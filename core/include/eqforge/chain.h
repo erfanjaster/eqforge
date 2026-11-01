@@ -56,7 +56,8 @@ void eqf_chain_free(eqf_chain *c);
 /* Configuration ---------------------------------------------------------- */
 
 /* Configure from a resolved dsp-config JSON document. The chain keeps
- * running; changes are applied with a short mute fade to avoid clicks. */
+ * running; changes are applied with a short mute fade to avoid clicks.
+ * `len` may be 0, in which case the string is assumed NUL-terminated. */
 int eqf_chain_configure_json(eqf_chain *c, const char *json, size_t len);
 int eqf_chain_configure_file(eqf_chain *c, const char *path);
 
@@ -87,6 +88,13 @@ uint32_t eqf_chain_latency(const eqf_chain *c);
 /* Most recent meter/state snapshot. */
 const eqf_chain_stats *eqf_chain_snapshot(const eqf_chain *c);
 const eqf_chain_stats *eqf_chain_meters(const eqf_chain *c);
+
+/* Copy the stats snapshot into *out with a seqlock read, so a control thread
+ * observes a consistent set of fields even while eqf_chain_process() runs on
+ * the audio thread. Returns EQF_OK, or EQF_ERR_STATE if the audio thread was
+ * mid-update for all 64 attempts (pathological CPU starvation; retry later).
+ * Prefer this over eqf_chain_snapshot() for any cross-thread read. */
+int eqf_chain_copy_stats(const eqf_chain *c, eqf_chain_stats *out);
 
 /* Last error message (per chain). */
 const char *eqf_chain_last_error(const eqf_chain *c);

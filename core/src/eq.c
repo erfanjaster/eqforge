@@ -22,15 +22,18 @@ void eqf_eq_init(eqf_eq *eq, uint32_t channels, uint32_t sample_rate)
 
 void eqf_eq_clear(eqf_eq *eq)
 {
-    for (uint32_t c = 0; c < eq->channels; c++)
+    for (uint32_t c = 0; c < EQF_MAX_CHANNELS; c++) {
         eq->bands_per_channel[c] = 0;
+        for (int b = 0; b < EQF_MAX_BANDS; b++)
+            eqf_biquad_reset(&eq->filters[c][b]);
+    }
     eq->active = false;
 }
 
 void eqf_eq_reset(eqf_eq *eq)
 {
-    for (uint32_t c = 0; c < eq->channels; c++)
-        for (int b = 0; b < eq->bands_per_channel[c]; b++)
+    for (uint32_t c = 0; c < EQF_MAX_CHANNELS; c++)
+        for (int b = 0; b < EQF_MAX_BANDS; b++)
             eqf_biquad_reset(&eq->filters[c][b]);
 }
 
@@ -38,10 +41,14 @@ void eqf_eq_set_sample_rate(eqf_eq *eq, uint32_t sample_rate)
 {
     if (sample_rate == 0 || sample_rate == eq->sample_rate)
         return;
-    /* Re-design all existing bands for the new rate, preserving the specs
-     * stored implicitly in `design` is not enough (we need type/gain/q), so
-     * callers must reload bands after a rate change; we simply invalidate. */
+    /* The coefficient set in `design` cannot be re-derived without the band
+     * specs (type/gain/Q), so callers must reload the band table after a rate
+     * change. Until they do, the EQ is bypassed rather than left running with
+     * coefficients designed for a different rate (which detunes every band). */
     eq->sample_rate = sample_rate;
+    eq->active = false;
+    for (uint32_t c = 0; c < EQF_MAX_CHANNELS; c++)
+        eq->bands_per_channel[c] = 0;
 }
 
 int eqf_eq_load(eqf_eq *eq, const eqf_band_spec *bands, int count,
@@ -54,9 +61,11 @@ int eqf_eq_load(eqf_eq *eq, const eqf_band_spec *bands, int count,
 
     /* Count per-channel allocations first. */
     int per_ch[EQF_MAX_CHANNELS] = { 0 };
+    int n_active = 0;
     for (int i = 0; i < count; i++) {
         if (!bands[i].enabled)
             continue;
+        n_active++;
         int ch = bands[i].channel;
         if (ch < 0) {
             for (uint32_t c = 0; c < eq->channels; c++)
@@ -72,6 +81,22 @@ int eqf_eq_load(eqf_eq *eq, const eqf_band_spec *bands, int count,
             return EQF_ERR_INVALID_ARG;
 
     int ramp = (int)(ramp_ms * 0.001 * (double)eq->sample_rate);
+
+    /* Retire filters that will no longer be used: clearing their state keeps a
+     * later re-add of a band from starting on stale history (a removed band used
+     * to ring for ever the moment its state was reused). */
+    for (uint32_t c = 0; c < eq->channels; c++) {
+        for (int b = per_ch[c]; b < EQF_MAX_BANDS; b++) {
+            eqf_biquad_reset(&eq->filters[c][b]);
+            eq->filters[c][b].current.b0 = 1.0f;
+            eq->filters[c][b].current.b1 = 0.0f;
+            eq->filters[c][b].current.b2 = 0.0f;
+            eq->filters[c][b].current.a1 = 0.0f;
+            eq->filters[c][b].current.a2 = 0.0f;
+            eq->filters[c][b].target = eq->filters[c][b].current;
+            eq->filters[c][b].ramp_left = 0;
+        }
+    }
 
     int idx[EQF_MAX_CHANNELS] = { 0 };
     for (int i = 0; i < count; i++) {
@@ -99,9 +124,7 @@ int eqf_eq_load(eqf_eq *eq, const eqf_band_spec *bands, int count,
     for (uint32_t c = 0; c < eq->channels; c++)
         eq->bands_per_channel[c] = per_ch[c];
 
-    /* Retire filters that are no longer used: set to unity so leftover state
-     * doesn't ring. They are not processed anyway (bands_per_channel). */
-    eq->active = (count > 0);
+    eq->active = (n_active > 0);
     return EQF_OK;
 }
 

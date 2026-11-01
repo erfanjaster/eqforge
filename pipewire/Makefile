@@ -12,7 +12,15 @@ CORE_INC := $(CORE_DIR)/include
 CORE_LIB := $(CORE_DIR)/build/libeqforge.a
 
 PKGS := libspa-0.2
+# SPA_CFLAGS lets you build against headers that pkg-config does not know about
+# (unpacked PipeWire source tree, cross toolchain, vendor include dir):
+#     make -C pipewire SPA_CFLAGS="-isystem /opt/pipewire/spa/include"
+SPA_CFLAGS ?=
+ifeq ($(strip $(SPA_CFLAGS)),)
 PW_CFLAGS := $(shell $(PKG_CONFIG) --cflags $(PKGS) | sed "s/-I/-isystem /g")
+else
+PW_CFLAGS := $(SPA_CFLAGS)
+endif
 CFLAGS ?= -O2
 WARNINGS := -Wall -Wextra -Wno-unused-parameter
 

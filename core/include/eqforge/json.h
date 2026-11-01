@@ -65,6 +65,10 @@ const char *eqf_json_get_string(const eqf_json *node, const char *def);
 double eqf_json_obj_number(const eqf_json *obj, const char *key, double def);
 bool eqf_json_obj_bool(const eqf_json *obj, const char *key, bool def);
 const char *eqf_json_obj_string(const eqf_json *obj, const char *key, const char *def);
+
+/* True when the object has `key` (of any type). Lets callers distinguish an
+ * absent field from one explicitly set to a default value. */
+bool eqf_json_obj_has(const eqf_json *obj, const char *key);
 const eqf_json *eqf_json_obj_array(const eqf_json *obj, const char *key);
 
 #ifdef __cplusplus

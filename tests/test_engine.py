@@ -63,6 +63,13 @@ def test_highpass_removes_dc_and_sub():
 
 
 def test_crossfeed_moves_energy():
+    """Crossfeed must obey Bauer's law, not merely "move some energy".
+
+    L' = 0.5*(L + feed*H(R)). Asserting the loose bound "the silent channel is
+    louder than 0.1" is what let a version with no 0.5 summing gain and a
+    doubled low-pass through, even though it measured +3.5 dB of bass boost on
+    a centred source. Pin both channels to their predicted values instead.
+    """
     sr = 48000
     l = synth.sine(200, 2.0, sr, amplitude=0.5, channels=1)
     x = np.concatenate([l, np.zeros_like(l)], axis=0)
@@ -71,10 +78,20 @@ def test_crossfeed_moves_energy():
     cfg_on["crossfeed"] = {"enabled": True, "level_db": -6, "fc_hz": 700}
     r_off = render(x, sr, cfg_off)
     r_on = render(x, sr, cfg_on)
-    r_energy_off = float(np.sqrt(np.mean(r_off.data[1][sr:] ** 2)))
-    r_energy_on = float(np.sqrt(np.mean(r_on.data[1][sr:] ** 2)))
-    assert r_energy_off < 1e-6
-    assert r_energy_on > 0.1  # ~-6 dB of 0.5 through the LP network
+    leak = float(np.sqrt(np.mean(r_on.data[1][sr:] ** 2)))
+    driven = float(np.sqrt(np.mean(r_on.data[0][sr:] ** 2)))
+    assert float(np.sqrt(np.mean(r_off.data[1][sr:] ** 2))) < 1e-6
+
+    # 0.5 summing gain: the driven channel comes out at exactly half its input.
+    assert abs(driven - 0.5 * 0.5 / np.sqrt(2)) < 1e-3, driven
+
+    # The fed channel carries |H(200 Hz)| * feed of the driven channel.
+    k = np.tan(np.pi * 700 / sr)
+    norm = 1.0 / (1.0 + k)
+    z = complex(np.cos(2 * np.pi * 200 / sr), -np.sin(2 * np.pi * 200 / sr))
+    h = abs((k * norm + k * norm * z) / (1 + (k - 1) * norm * z))
+    # the leak path carries the same outer 0.5: 0.5*feed*H*input_rms
+    assert abs(leak - 0.5 * h * 10 ** (-6 / 20) * 0.5 / np.sqrt(2)) < 2e-3, (leak, h)
 
 
 def test_convolver_delta_ir_is_transparent():

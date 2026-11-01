@@ -2,8 +2,17 @@
  *
  * Feeds an attenuated, low-passed copy of each channel into the opposite
  * ear, reducing the unnatural "inside the head" lateralization of headphone
- * playback. Two biquad low-pass sections per direction approximate the
- * classic Meier-style crossfeed network.
+ * playback.
+ *
+ *     L' = 0.5 * (L + feed * H(f) * R)
+ *     R' = 0.5 * (R + feed * H(f) * L)
+ *
+ * H(f) is a single 2nd-order low-pass at fc_hz and feed = 10^(level_db/20).
+ * The 0.5 makes the network loudness preserving for a centred source, which
+ * is what lets a listener leave it enabled permanently. Note that the feed
+ * path is H(f) itself, not a cascade: cascading two sections would square the
+ * response and, with the previous non-normalised summing, produced a +3.5 dB
+ * bass boost instead of a smooth crossfeed.
  *
  * SPDX-License-Identifier: MIT
  */
@@ -32,7 +41,7 @@ typedef struct {
     eqf_crossfeed_config cfg;
     uint32_t sample_rate;
     float feed;             /* linear crossfeed gain */
-    eqf_biquad lp[2][2];    /* [direction][stage] */
+    eqf_biquad lp[2][2];    /* [direction][stage]; only stage 0 is in use */
     float scratch[EQF_MAX_BLOCK];
     float scratch2[EQF_MAX_BLOCK];
     bool active;

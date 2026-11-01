@@ -234,12 +234,28 @@ def cmd_system(args) -> int:
 
     if action == "setup":
         from eqforge.system.module_config import write_system_setup
+        results: list = []
         written = write_system_setup(paths,
                                      exec_path=Path(args.rt_binary)
-                                     if args.rt_binary else None)
-        out.echo(f"  {out.green('✓')} wrote integration files:")
-        for w in written:
-            out.echo(f"    {w}")
+                                     if args.rt_binary else None,
+                                     results=results)
+        # Report what actually happened to each file. Saying "wrote" for a file
+        # that was left alone (or silently replaced) is exactly the kind of
+        # fake success a user cannot act on.
+        out.echo(f"  {out.green('✓')} integration files:")
+        for path, status, backup in results:
+            if status == "created":
+                out.echo(f"    {out.green('created')}  {path}")
+            elif status == "same":
+                out.echo(f"    {out.dim('unchanged')} {path}")
+            else:
+                out.echo(f"    {out.yellow('updated')}  {path}")
+                if backup is not None:
+                    out.echo(f"      previous version saved as {backup}")
+        if any(st == "updated" for _, st, _ in results):
+            out.echo(out.dim(
+                "  review the updates before restarting: those files are yours "
+                "to edit"))
         out.echo(out.dim("""
   next steps:
     1. install the native filter (make -C pipewire install) or the rt host

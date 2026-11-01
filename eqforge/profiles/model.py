@@ -83,6 +83,9 @@ class Profile:
 
     filters: list[FilterSpec] = field(default_factory=list)
     filters_op: str = "replace"   # inheritance: replace | append
+    # True when the source document carried an explicit "filters" key.
+    # None-from-disk means "inherit from parents"; [] means "none".
+    filters_given: bool = True
 
     crossfeed: dict = field(default_factory=dict)
     convolver: dict = field(default_factory=dict)
@@ -120,7 +123,14 @@ class Profile:
         d["preamp"] = {"mode": self.preamp_mode}
         if self.preamp_mode == "manual":
             d["preamp"]["gain_db"] = self.preamp_db
-        d["eq"] = {"filters": [f.to_dict() for f in self.filters]}
+        # Only emit a band list when the profile actually owns bands or is
+        # deliberately replacing its parents'. A child that merely tweaks the
+        # preamp must not write `"filters": []`, because an explicit empty
+        # list means "replace with nothing" and would silently discard every
+        # inherited band.
+        if (self.filters or self.filters_given
+                or self.filters_op != "replace" or not self.extends):
+            d["eq"] = {"filters": [f.to_dict() for f in self.filters]}
         if self.filters_op != "replace":
             d["eq"]["filters_op"] = self.filters_op
         if self.crossfeed:
@@ -163,6 +173,9 @@ class Profile:
             preamp_mode=str(pre.get("mode", "auto")),
             preamp_db=float(pre.get("gain_db", 0.0)),
             filters=[FilterSpec.from_dict(f) for f in (eq.get("filters") or [])],
+            # distinguish "no bands declared" (None -> inherit) from "an empty
+            # list was given" ([] -> replace with nothing)
+            filters_given=eq.get("filters") is not None,
             filters_op=str(eq.get("filters_op", "replace")),
             crossfeed=dict(d.get("crossfeed") or {}),
             convolver=dict(d.get("convolver") or {}),

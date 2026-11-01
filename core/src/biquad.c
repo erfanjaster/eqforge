@@ -16,6 +16,18 @@
 
 #define TWO_PI (2.0 * M_PI)
 
+/* A non-finite sample latches into DF2T state and poisons the filter for the
+ * rest of the session (and NaN compares false against every guard). Clamp at
+ * the input edge instead. */
+static inline float eqf_sanitize(float x)
+{
+    if (x == x && x < 3.0e38f && x > -3.0e38f)
+        return x;
+    if (x != x)
+        return 0.0f;                  /* NaN */
+    return x > 0.0f ? 1.0f : -1.0f;   /* +-Inf */
+}
+
 int eqf_biquad_design(eqf_biquad_coeffs *c, enum eqf_filter_type type,
                       double freq_hz, double gain_db, double q_or_slope,
                       bool use_q, double sample_rate)
@@ -176,7 +188,7 @@ void eqf_biquad_process(eqf_biquad *f, float *buf, int n)
 
     if (ramp <= 0) {
         for (int i = 0; i < n; i++) {
-            float x = buf[i];
+            float x = eqf_sanitize(buf[i]);
             float y = b0 * x + z1;
             z1 = b1 * x - a1 * y + z2;
             z2 = b2 * x - a2 * y;
@@ -188,7 +200,7 @@ void eqf_biquad_process(eqf_biquad *f, float *buf, int n)
         int i = 0;
         for (; i < n && ramp > 0; i++, ramp--) {
             b0 += sb0; b1 += sb1; b2 += sb2; a1 += sa1; a2 += sa2;
-            float x = buf[i];
+            float x = eqf_sanitize(buf[i]);
             float y = b0 * x + z1;
             z1 = b1 * x - a1 * y + z2;
             z2 = b2 * x - a2 * y;
@@ -199,7 +211,7 @@ void eqf_biquad_process(eqf_biquad *f, float *buf, int n)
         b0 = f->current.b0; b1 = f->current.b1; b2 = f->current.b2;
         a1 = f->current.a1; a2 = f->current.a2;
         for (; i < n; i++) {
-            float x = buf[i];
+            float x = eqf_sanitize(buf[i]);
             float y = b0 * x + z1;
             z1 = b1 * x - a1 * y + z2;
             z2 = b2 * x - a2 * y;
@@ -210,9 +222,11 @@ void eqf_biquad_process(eqf_biquad *f, float *buf, int n)
     f->z1 = z1;
     f->z2 = z2;
 
-    /* Safety net: denormals can crawl on some x86 units; flush them. */
-    if (fabsf(z1) < 1e-20f) f->z1 = 0.0f;
-    if (fabsf(z2) < 1e-20f) f->z2 = 0.0f;
+    /* Safety net: denormals can crawl on some x86 units; flush them, and
+     * recover from a non-finite state that slipped through (e.g. an
+     * impossible coefficient set) rather than propagating it for ever. */
+    if (!isfinite(z1) || fabsf(z1) < 1e-20f) f->z1 = 0.0f;
+    if (!isfinite(z2) || fabsf(z2) < 1e-20f) f->z2 = 0.0f;
 }
 
 double eqf_biquad_magnitude(const eqf_biquad_coeffs *c, double f_hz,

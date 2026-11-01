@@ -352,6 +352,124 @@ static void test_crossfeed(void)
     CHECK(rp < 0.15f);
 }
 
+/* Least-squares amplitude of a steady sinusoid in y[from..to), so the
+ * measurement does not depend on how many whole cycles fit in the window. */
+static double measure_amp(const float *y, int from, int to, double f, int sr)
+{
+    double w = 2.0 * M_PI * f / (double)sr;
+    double ss = 0, cc = 0, sc = 0, ys = 0, yc = 0;
+    for (int i = from; i < to; i++) {
+        double s = sin(w * i), c = cos(w * i);
+        ss += s * s; cc += c * c; sc += s * c;
+        ys += (double)y[i] * s; yc += (double)y[i] * c;
+    }
+    double det = ss * cc - sc * sc;
+    if (fabs(det) < 1e-12)
+        return 0.0;
+    double A = (ys * cc - yc * sc) / det, B = (yc * ss - ys * sc) / det;
+    return sqrt(A * A + B * B);
+}
+
+/* Run a sinusoid of amplitude amp through a freshly reset crossfeed and
+ * return the steady-state output amplitude of channel ch. */
+static double crossfeed_response(double f, double amp, int ch)
+{
+    enum { N = 48000 };
+    static float l[N], r[N];
+    for (int i = 0; i < N; i++) {
+        l[i] = (float)(amp * sin(2.0 * M_PI * f * i / 48000.0));
+        r[i] = l[i];
+    }
+    eqf_crossfeed xf;
+    eqf_crossfeed_init(&xf, 48000);
+    eqf_crossfeed_config cfg;
+    eqf_crossfeed_config_default(&cfg);
+    cfg.enabled = true;
+    cfg.level_db = -6.0;
+    cfg.fc_hz = 700.0;
+    eqf_crossfeed_configure(&xf, &cfg);
+    eqf_crossfeed_set_active(&xf, true);
+    eqf_crossfeed_process(&xf, l, r, N);
+    return measure_amp(ch ? r : l, N / 2, N, f, 48000);
+}
+
+static void test_crossfeed_response(void)
+{
+    printf("test_crossfeed_response\n");
+    const double amp = 0.2;
+
+    /* 1. The response must be smooth. A cascade of two low-passes summed onto
+     *    an unattenuated direct path produced +3.49 dB at 50 Hz, +1.81 dB at
+     *    300 Hz and -1.76 dB at 500 Hz - a non-monotonic wobble. Assert the
+     *    measured curve is non-increasing from 50 Hz to 2 kHz. */
+    const double fs[] = { 50, 100, 300, 500, 700, 1000, 2000 };
+    double prev = 1e9;
+    for (int k = 0; k < (int)(sizeof fs / sizeof fs[0]); k++) {
+        double db = 20.0 * log10(crossfeed_response(fs[k], amp, 0) / amp);
+        CHECK(db < prev + 0.05);      /* never turns back upward */
+        prev = db;
+    }
+
+    /* 2. Nothing may be boosted. A crossfeed left permanently on must not add
+     *    energy; the old "+3.5 dB of bass" was exactly the objection. */
+    for (int k = 0; k < (int)(sizeof fs / sizeof fs[0]); k++) {
+        double db = 20.0 * log10(crossfeed_response(fs[k], amp, 0) / amp);
+        CHECK(db <= 0.5);
+    }
+
+    /* 3. Below the corner the level must stay in a usable band: the 0.5 summing
+     *    gain costs (1+feed)/2 = -2.49 dB at DC for a centred source. Pin it so
+     *    a future edit cannot silently drop or double the normalisation. */
+    double dc = 20.0 * log10(crossfeed_response(50.0, amp, 0) / amp);
+    double expect = 20.0 * log10(0.5 * (1.0 + pow(10.0, -6.0 / 20.0)));
+    CHECK(fabs(dc - expect) < 0.5);
+
+    /* 4. The point of the network: correlated low frequencies are shared, but a
+     *    hard-panned 10 kHz signal must stay put. */
+    {
+        enum { N = 48000 };
+        static float l[N], r[N];
+        for (int i = 0; i < N; i++) { l[i] = 0.5f; r[i] = -0.5f; }
+        eqf_crossfeed xf;
+        eqf_crossfeed_init(&xf, 48000);
+        eqf_crossfeed_config cfg;
+        eqf_crossfeed_config_default(&cfg);
+        cfg.enabled = true;
+        cfg.level_db = -6.0;
+        cfg.fc_hz = 700.0;
+        eqf_crossfeed_configure(&xf, &cfg);
+        eqf_crossfeed_set_active(&xf, true);
+        eqf_crossfeed_process(&xf, l, r, N);
+        /* anti-phase DC cancels: 0.5*(0.5 + g*(-0.5)) */
+        double expc = 0.5 * (0.5 - pow(10.0, -6.0 / 20.0) * 0.5);
+        CHECK(fabs((double)l[N - 1] - expc) < 1e-3);
+        CHECK(fabs((double)r[N - 1] + expc) < 1e-3);
+    }
+
+    /* 5. Disabled must be a true bypass - not merely "less" processing. */
+    {
+        enum { N = 4096 };
+        static float l[N], r[N], l2[N], r2[N];
+        for (int i = 0; i < N; i++) {
+            l[i] = l2[i] = (float)(0.3 * sin(0.01 * i));
+            r[i] = r2[i] = (float)(-0.2 * sin(0.013 * i));
+        }
+        eqf_crossfeed xf;
+        eqf_crossfeed_init(&xf, 48000);
+        eqf_crossfeed_config cfg;
+        eqf_crossfeed_config_default(&cfg);
+        cfg.enabled = false;
+        eqf_crossfeed_configure(&xf, &cfg);
+        eqf_crossfeed_set_active(&xf, false);
+        eqf_crossfeed_process(&xf, l, r, N);
+        int same = 1;
+        for (int i = 0; i < N; i++)
+            if (l[i] != l2[i] || r[i] != r2[i])
+                same = 0;
+        CHECK(same);
+    }
+}
+
 /* ---------------- convolver ---------------- */
 
 static void test_convolver(void)
@@ -504,6 +622,116 @@ static void test_chain(void)
     eqf_chain_free(c);
 }
 
+/* eqf_chain_set_channels() swaps the whole struct in place. That is the only
+ * place in the core that moves a chain's entire state, and it had no test at
+ * all - the C++ canary was what surfaced that the swap had to become explicit
+ * once the stats seqlock made the struct non-copyable. These checks pin the
+ * observable behaviour: the chain really changes channel count, keeps its
+ * sample rate and config, keeps processing, and leaks nothing (the swap frees
+ * the temporary chain). */
+static void test_chain_set_channels(void)
+{
+    printf("test_chain_set_channels\n");
+    const char *cfg =
+        "{\"preamp_db\": -3.0,"
+        " \"eq\": {\"filters\": ["
+        "   {\"type\": \"peak\", \"freq\": 2000, \"gain_db\": 6.0, \"q\": 1.0}]},"
+        " \"limiter\": {\"enabled\": true, \"ceiling_db\": -2.0,"
+        "               \"attack_ms\": 1, \"release_ms\": 40,"
+        "               \"lookahead_ms\": 2}}";
+
+    eqf_chain *c = eqf_chain_new(2, 44100, 512);
+    CHECK(c != NULL);
+    CHECK(eqf_chain_configure_json(c, cfg, 0) == EQF_OK);
+    const uint32_t lat_before = eqf_chain_latency(c);
+    CHECK(lat_before > 0);
+
+    /* down to mono */
+    CHECK(eqf_chain_set_channels(c, 1) == EQF_OK);
+    CHECK(eqf_chain_snapshot(c)->channels == 1);
+    /* the limiter lookahead is a duration, so latency must still be ~2 ms */
+    uint32_t lat_1 = eqf_chain_latency(c);
+    CHECK(lat_1 == lat_before);
+    /* config survives the swap */
+    const char *cur = eqf_chain_current_config(c);
+    CHECK(cur != NULL && strstr(cur, "2000") != NULL);
+
+    enum { BLK = 128 };
+    static float mono[BLK];
+    float *m[1] = { mono };
+    for (int blk = 0; blk < 50; blk++) {
+        for (int i = 0; i < BLK; i++)
+            mono[i] = 0.5f * (float)sin(2.0 * M_PI * 440.0 *
+                                        (blk * BLK + i) / 44100.0);
+        CHECK(eqf_chain_process(c, m, m, BLK) == EQF_OK);
+    }
+    /* still limiting after the swap: output must respect the -2 dB ceiling */
+    float peak = 0.0f;
+    for (int blk = 0; blk < 100; blk++) {
+        for (int i = 0; i < BLK; i++)
+            mono[i] = 0.5f * (float)sin(2.0 * M_PI * 1000.0 *
+                                        (blk * BLK + i) / 44100.0);
+        CHECK(eqf_chain_process(c, m, m, BLK) == EQF_OK);
+        for (int i = 0; i < BLK; i++) {
+            float a = fabsf(mono[i]);
+            if (a > peak)
+                peak = a;
+        }
+    }
+    const float ceiling = (float)pow(10.0, -2.0 / 20.0);
+    CHECK(peak <= ceiling + 1e-4f);
+
+    /* back up to four channels, then down to two again */
+    CHECK(eqf_chain_set_channels(c, 4) == EQF_OK);
+    CHECK(eqf_chain_snapshot(c)->channels == 4);
+    CHECK(eqf_chain_set_channels(c, 2) == EQF_OK);
+    CHECK(eqf_chain_snapshot(c)->channels == 2);
+
+    /* invalid requests are rejected without disturbing the chain */
+    CHECK(eqf_chain_set_channels(c, 0) == EQF_ERR_INVALID_ARG);
+    CHECK(eqf_chain_set_channels(c, EQF_MAX_CHANNELS + 1) == EQF_ERR_INVALID_ARG);
+    CHECK(eqf_chain_snapshot(c)->channels == 2);
+
+    /* same-count request is a no-op that reports success */
+    CHECK(eqf_chain_set_channels(c, 2) == EQF_OK);
+
+    eqf_chain_free(c);
+}
+
+/* The stats snapshot is published to other threads through a seqlock. The
+ * seqlock can only be validated under concurrency, which needs a real audio
+ * thread; here we check the observable contract: the copy matches the live
+ * snapshot when no writer is running, and rejects a NULL argument. */
+static void test_chain_stats_copy(void)
+{
+    printf("test_chain_stats_copy\n");
+    eqf_chain *c = eqf_chain_new(2, 48000, 256);
+    CHECK(c != NULL);
+    eqf_chain_stats copy;
+    CHECK(eqf_chain_copy_stats(c, &copy) == EQF_OK);
+    CHECK(copy.channels == 2);
+    CHECK(eqf_chain_copy_stats(NULL, &copy) == EQF_ERR_INVALID_ARG);
+    CHECK(eqf_chain_copy_stats(c, NULL) == EQF_ERR_INVALID_ARG);
+
+    /* after processing, the copy reflects the live values */
+    static float l[256], r[256];
+    float *io[2] = { l, r };
+    for (int blk = 0; blk < 20; blk++) {
+        for (int i = 0; i < 256; i++) {
+            l[i] = r[i] = 0.4f * (float)sin(2.0 * M_PI * 997.0 *
+                                            (blk * 256 + i) / 48000.0);
+        }
+        CHECK(eqf_chain_process(c, io, io, 256) == EQF_OK);
+    }
+    CHECK(eqf_chain_copy_stats(c, &copy) == EQF_OK);
+    const eqf_chain_stats *live = eqf_chain_snapshot(c);
+    /* writer is idle now, so the copy must be exact */
+    CHECK(copy.out_peak[0] == live->out_peak[0]);
+    CHECK(copy.momentary_lufs == live->momentary_lufs);
+    CHECK(copy.channels == live->channels);
+    eqf_chain_free(c);
+}
+
 static void test_version(void)
 {
     printf("test_version\n");
@@ -523,9 +751,12 @@ int main(void)
     test_compressor();
     test_limiter();
     test_crossfeed();
+    test_crossfeed_response();
     test_convolver();
     test_meter();
     test_chain();
+    test_chain_set_channels();
+    test_chain_stats_copy();
     printf("\n%d checks, %d failures\n", tests_run, tests_failed);
     return tests_failed ? 1 : 0;
 }

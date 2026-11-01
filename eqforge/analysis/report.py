@@ -90,8 +90,19 @@ def analyze(data: np.ndarray, sample_rate: int,
     r = AnalysisReport()
     r.sample_rate = int(sample_rate)
     r.channels = int(x.shape[0])
-    r.frames = int(x.shape[1])
-    r.duration_s = r.frames / float(sample_rate) if sample_rate else 0.0
+    r.frames = int(x.shape[1]) if x.ndim > 1 else 0
+    if sample_rate:
+        r.duration_s = r.frames / float(sample_rate)
+    if r.frames == 0:
+        # A zero-length file is legal input (and a real failure mode of broken
+        # recorders): report "silence" instead of crashing on empty reductions.
+        r.notes.append("file contains no audio frames")
+        r.silent_ratio = 1.0
+        return r
+    if not np.all(np.isfinite(x)):
+        r.notes.append("non-finite samples present (NaN/Inf) - clamped for "
+                       "measurement")
+        x = np.nan_to_num(x, nan=0.0, posinf=1.0, neginf=-1.0)
 
     r.peak_db = L.peak_db(x)
     r.true_peak_db = L.true_peak_db(x)
@@ -112,7 +123,8 @@ def analyze(data: np.ndarray, sample_rate: int,
 
     r.clipped_samples, r.clipping_events = _count_clipping(x)
     r.inter_sample_peak_over_0dbfs = bool(r.true_peak_db > 0.0)
-    rms_env = np.sqrt(np.mean(x ** 2, axis=0))
+    rms_env = np.sqrt(np.mean(np.square(x), axis=0)) if r.frames else \
+        np.zeros(0)
     r.silent_ratio = float(np.mean(rms_env < 10 ** (-60 / 20)))
 
     r.band_energy_db = S.band_energies_db(x, sample_rate)

@@ -540,6 +540,11 @@ bool eqf_json_obj_bool(const eqf_json *obj, const char *key, bool def)
     return eqf_json_get_bool(eqf_json_obj_get(obj, key), def);
 }
 
+bool eqf_json_obj_has(const eqf_json *obj, const char *key)
+{
+    return eqf_json_obj_get(obj, key) != NULL;
+}
+
 const char *eqf_json_obj_string(const eqf_json *obj, const char *key, const char *def)
 {
     return eqf_json_get_string(eqf_json_obj_get(obj, key), def);

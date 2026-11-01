@@ -27,6 +27,9 @@ class ProfileStore:
                  builtin_dir: Path | None = None):
         self.user_dir = user_dir or paths.profiles_dir()
         self.builtin_dir = builtin_dir or BUILTIN_DIR
+        # Warnings from the most recent save(); callers surface them so a
+        # profile that is valid but suspicious does not save silently.
+        self.last_warnings: list = []
 
     # ---------------- discovery ----------------
     def _scan(self, directory: Path, builtin: bool) -> dict[str, Path]:
@@ -125,14 +128,31 @@ class ProfileStore:
         return d
 
     def save(self, profile: Profile, migrate_on_save: bool = True,
-             _tmp_id: str | None = None) -> Path:
+             _tmp_id: str | None = None,
+             raw: dict | None = None) -> Path:
+        """Persist a profile.
+
+        `raw` is the document as the caller supplied it. Validating the
+        re-serialised form is not enough: keys the model does not understand
+        (for example a band list under the wrong name) survive only in `extra`
+        and produce no warning about the field that was actually mistyped, so
+        a profile that silently plays nothing saves without complaint.
+        Warnings collected here are stored on `self.last_warnings`.
+        """
         paths.ensure_dirs()
         d = profile.to_dict()
+        self.last_warnings = []
         if migrate_on_save:
+            if raw is not None:
+                self.last_warnings = validate_or_raise(raw)
             validate_or_raise(d)
         d["modified"] = time.time()
         pid = _tmp_id or profile.id
         path = self.user_dir / f"{pid.replace('/', '_')}.json"
+        # First run, or a caller pointing the store at a fresh directory: the
+        # parent must exist before the write. Importing the first profile on a
+        # clean account used to die with FileNotFoundError here.
+        path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(d, indent=2) + "\n", encoding="utf-8")
         return path
     def save_raw(self, d: dict, pid: str | None = None) -> Path:

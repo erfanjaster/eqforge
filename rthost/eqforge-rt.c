@@ -52,8 +52,23 @@ struct rt_state {
     jack_port_t *out[MAX_CHANNELS];
     uint32_t channels;
 
-    eqf_chain *chain;
-    pthread_mutex_t chain_lock;   /* held only around reconfigure, not audio */
+    /* Same ownership discipline as the SPA module: the audio thread only ever
+     * loads a published pointer, and never allocates or frees. Reloads and
+     * sample-rate changes build a replacement chain on the control thread and
+     * publish it; the retired chain is freed by the control thread. */
+    _Atomic(eqf_chain *) chain;
+    /* Retired chains must not be freed until the audio thread provably cannot
+     * still be dereferencing them. Tracking an in-flight flag is exact; an
+     * earlier version slept for two periods, which is a timing guess and does
+     * not establish happens-before for the sanitizers (or for a preempted
+     * audio thread). */
+    _Atomic bool processing;      /* set by the audio thread around its work */
+    eqf_chain *retired[4];
+    uint32_t retired_n;
+    pthread_mutex_t reload_lock;  /* serialises control-thread rebuilds */
+    uint32_t channels_wanted;
+    _Atomic uint32_t rate_wanted; /* set by srate_cb, applied off-thread */
+    _Atomic bool rebuild_requested;
     _Atomic bool bypass;
     _Atomic bool quit;
 
@@ -84,13 +99,16 @@ static int process(jack_nframes_t nframes, void *arg)
         return 0;
     }
 
-    eqf_chain *chain = st->chain; /* stable pointer; reconfigure is in-place */
+    atomic_store_explicit(&st->processing, true, memory_order_seq_cst);
+    eqf_chain *chain = atomic_load_explicit(&st->chain, memory_order_acquire);
     if (!chain) {
+        atomic_store_explicit(&st->processing, false, memory_order_seq_cst);
         for (uint32_t c = 0; c < st->channels; c++)
             memcpy(out[c], in[c], nframes * sizeof(float));
         return 0;
     }
     eqf_chain_process(chain, in, out, nframes);
+    atomic_store_explicit(&st->processing, false, memory_order_seq_cst);
     return 0;
 }
 
@@ -98,7 +116,8 @@ static void latency_cb(jack_latency_callback_mode_t mode, void *arg)
 {
     struct rt_state *st = arg;
     jack_latency_range_t range;
-    uint32_t lat = st->chain ? eqf_chain_latency(st->chain) : 0;
+    eqf_chain *chain = atomic_load(&st->chain);
+    uint32_t lat = chain ? eqf_chain_latency(chain) : 0;
     range.min = range.max = lat;
     for (uint32_t c = 0; c < st->channels; c++) {
         if (mode == JackCaptureLatency)
@@ -108,12 +127,17 @@ static void latency_cb(jack_latency_callback_mode_t mode, void *arg)
     }
 }
 
+/* JACK runs this on its own (non-RT) thread, but eqf_chain_set_sample_rate()
+ * frees and reallocates the meters - so it must not run here either: it races
+ * with process() and would hand a freed chain to the audio thread. Record the
+ * request and let the control thread perform the rebuild. */
 static int srate_cb(jack_nframes_t nframes, void *arg)
 {
     struct rt_state *st = arg;
-    if (st->chain)
-        eqf_chain_set_sample_rate(st->chain, nframes);
-    fprintf(stderr, "eqforge-rt: sample rate -> %u\n", nframes);
+    atomic_store(&st->rate_wanted, (uint32_t)nframes);
+    atomic_store(&st->rebuild_requested, true);
+    fprintf(stderr, "eqforge-rt: sample rate -> %u (applying off-thread)\n",
+            nframes);
     return 0;
 }
 
@@ -167,6 +191,79 @@ static int json_find_bool(const char *json, const char *key, int def)
     return def;
 }
 
+/* ---------------- control-thread chain rebuild ---------------- */
+
+/* Build a replacement chain (optionally from a config file), publish it, and
+ * keep the previous one in `retired` for the caller to free once the audio
+ * thread can no longer be using it. Returns EQF_OK on success. */
+static int build_and_publish(struct rt_state *st, const char *config_path,
+                             uint32_t rate)
+{
+    eqf_chain *prev = atomic_load(&st->chain);
+
+    eqf_chain *nc = eqf_chain_new(st->channels_wanted, rate, RT_MAX_BLOCK);
+    if (!nc) {
+        fprintf(stderr, "eqforge-rt: chain allocation failed\n");
+        return EQF_ERR_NO_MEMORY;
+    }
+    if (config_path) {
+        int rc = eqf_chain_configure_file(nc, config_path);
+        if (rc != EQF_OK) {
+            fprintf(stderr, "eqforge-rt: config '%s' rejected: %s\n",
+                    config_path, eqf_result_str(rc));
+            eqf_chain_free(nc);
+            return rc;
+        }
+    } else if (prev) {
+        /* Rate change with no new file: re-run the previous chain's own
+         * serialized config at the new rate so coefficients are recomputed. */
+        const char *copy = eqf_chain_current_config(prev);
+        if (copy) {
+            int rc = eqf_chain_configure_json(nc, copy, strlen(copy));
+            if (rc != EQF_OK)
+                fprintf(stderr, "eqforge-rt: re-design at %u Hz failed: %s\n",
+                        rate, eqf_result_str(rc));
+        }
+    }
+    /* Publish. The audio thread reads `st->chain` once per cycle. */
+    atomic_store_explicit(&st->chain, nc, memory_order_release);
+
+    /* Retire the previous chain; reap_retired() frees it once the audio
+     * thread is provably outside the callback. Callers hold reload_lock. */
+    if (prev && st->retired_n < 4)
+        st->retired[st->retired_n++] = prev;
+    else if (prev)
+        eqf_chain_free(prev);     /* pathological: 4 uncollected rebuilds */
+    return EQF_OK;
+}
+
+/* Allocate-free of retired chains, safe against a concurrently running audio
+ * callback:
+ *   1. spin until the audio thread is outside process() (bounded),
+ *   2. set `processing` ourselves so the audio thread cannot re-enter and
+ *      pick up the old pointer while we free,
+ *   3. free, then release.
+ * The audio thread only ever sets this flag around its own callback, so the
+ * window is at most one callback duration. */
+static void reap_retired(struct rt_state *st)
+{
+    if (st->retired_n == 0)
+        return;
+    for (int i = 0; i < 20000; i++) {          /* <= ~200 ms */
+        if (!atomic_load_explicit(&st->processing, memory_order_seq_cst))
+            break;
+        struct timespec ts = { 0, 10000L };    /* 10 us */
+        nanosleep(&ts, NULL);
+    }
+    bool was = atomic_exchange(&st->processing, true);
+    for (uint32_t i = 0; i < st->retired_n; i++) {
+        eqf_chain_free(st->retired[i]);
+        st->retired[i] = NULL;
+    }
+    st->retired_n = 0;
+    atomic_store(&st->processing, was);
+}
+
 /* ---------------- control socket ---------------- */
 
 static void handle_command(struct rt_state *st, const char *line,
@@ -177,14 +274,17 @@ static void handle_command(struct rt_state *st, const char *line,
 
     if (!strcmp(cmd, "reload")) {
         if (json_find_string(line, "path", path, sizeof(path))) {
-            pthread_mutex_lock(&st->chain_lock);
-            if (!st->chain)
-                st->chain = eqf_chain_new(st->channels,
-                                          jack_get_sample_rate(st->client),
-                                          RT_MAX_BLOCK);
-            int rc = st->chain ? eqf_chain_configure_file(st->chain, path)
-                               : EQF_ERR_STATE;
-            pthread_mutex_unlock(&st->chain_lock);
+            /* Build the replacement off the audio thread, publish it, and let
+             * the reaper free the old graph once no callback can hold it. A
+             * rejected config leaves the running chain untouched. */
+            pthread_mutex_lock(&st->reload_lock);
+            uint32_t rate = atomic_load(&st->rate_wanted);
+            if (rate == 0)
+                rate = jack_get_sample_rate(st->client);
+            int rc = build_and_publish(st, path, rate);
+            pthread_mutex_unlock(&st->reload_lock);
+            if (rc == EQF_OK)
+                reap_retired(st);
             snprintf(reply, reply_len,
                      "{\"ok\":%s,\"rc\":%d,\"error\":\"%s\"}",
                      rc == EQF_OK ? "true" : "false", rc,
@@ -240,7 +340,13 @@ static void handle_command(struct rt_state *st, const char *line,
         return;
     }
     if (!strcmp(cmd, "status")) {
-        const eqf_chain_stats *s = st->chain ? eqf_chain_snapshot(st->chain) : NULL;
+        eqf_chain *live = atomic_load(&st->chain);
+        /* Consistent copy: reading the live snapshot struct directly races
+         * with the audio thread rewriting it. */
+        eqf_chain_stats stats_copy;
+        eqf_chain_stats *s = NULL;
+        if (live && eqf_chain_copy_stats(live, &stats_copy) == EQF_OK)
+            s = &stats_copy;
         snprintf(reply, reply_len,
                  "{\"ok\":true,\"version\":\"%s\",\"channels\":%u,"
                  "\"sample_rate\":%u,\"buffer_size\":%u,"
@@ -250,7 +356,7 @@ static void handle_command(struct rt_state *st, const char *line,
                  eqf_version_string(), st->channels,
                  jack_get_sample_rate(st->client),
                  jack_get_buffer_size(st->client),
-                 st->chain ? eqf_chain_latency(st->chain) : 0,
+                 live ? eqf_chain_latency(live) : 0,
                  atomic_load(&st->bypass) ? "true" : "false",
                  s ? (double)s->momentary_lufs : -70.0,
                  s ? 20.0 * log10(fmax(s->out_peak[0], 1e-9)) : -70.0,
@@ -269,6 +375,22 @@ static void *ctl_thread(void *arg)
 {
     struct rt_state *st = arg;
     while (!atomic_load(&st->quit)) {
+        /* A sample-rate change requested by JACK is applied here, never in the
+         * JACK callback: rebuilding reallocates the meters. */
+        if (atomic_exchange(&st->rebuild_requested, false)) {
+            uint32_t rate = atomic_load(&st->rate_wanted);
+            if (rate > 0) {
+                pthread_mutex_lock(&st->reload_lock);
+                int rc = build_and_publish(st, NULL, rate);
+                pthread_mutex_unlock(&st->reload_lock);
+                if (rc == EQF_OK)
+                    reap_retired(st);
+                else
+                    fprintf(stderr,
+                            "eqforge-rt: rebuild for %u Hz failed: %s\n",
+                            rate, eqf_result_str(rc));
+            }
+        }
         struct pollfd pfd = { .fd = st->listen_fd, .events = POLLIN };
         int pr = poll(&pfd, 1, 200);
         if (pr <= 0)
@@ -319,7 +441,8 @@ int main(int argc, char **argv)
     struct rt_state *st = &g_state;
     memset(st, 0, sizeof(*st));
     st->channels = 2;
-    pthread_mutex_init(&st->chain_lock, NULL);
+    st->channels_wanted = 2;
+    pthread_mutex_init(&st->reload_lock, NULL);
     const char *client_name = "eqforge";
     const char *config = NULL;
 
@@ -345,6 +468,7 @@ int main(int argc, char **argv)
         fprintf(stderr, "eqforge-rt: channels must be 1..%d\n", MAX_CHANNELS);
         return 1;
     }
+    st->channels_wanted = st->channels;
 
     if (st->socket_path[0] == '\0') {
         const char *xdg = getenv("XDG_RUNTIME_DIR");
@@ -382,17 +506,16 @@ int main(int argc, char **argv)
         }
     }
 
-    st->chain = eqf_chain_new(st->channels, jack_get_sample_rate(st->client),
-                              RT_MAX_BLOCK);
-    if (!st->chain) {
-        fprintf(stderr, "eqforge-rt: chain allocation failed\n");
-        return 2;
-    }
-    if (config) {
-        int rc = eqf_chain_configure_file(st->chain, config);
-        if (rc != EQF_OK)
-            fprintf(stderr, "eqforge-rt: initial config rejected: %s\n",
-                    eqf_result_str(rc));
+    {
+        uint32_t rate = jack_get_sample_rate(st->client);
+        atomic_store(&st->rate_wanted, rate);
+        int rc = build_and_publish(st, config, rate);
+        if (rc != EQF_OK && !config) {
+            /* No initial config is legitimate (pass-through), but a failure to
+             * allocate the chain is not. */
+            fprintf(stderr, "eqforge-rt: chain allocation failed\n");
+            return 2;
+        }
     }
 
     /* control socket */
@@ -442,6 +565,13 @@ int main(int argc, char **argv)
     close(st->listen_fd);
     unlink(st->socket_path);
     pthread_join(st->ctl_thread, NULL);
-    eqf_chain_free(st->chain);
+    /* Stop the audio thread first, then release both the live and the retired
+     * chain. (Dropping the live pointer without freeing it leaks the whole
+     * graph - caught by LeakSanitizer, not by any functional check.) */
+    eqf_chain *live = atomic_exchange(&st->chain, NULL);
+    eqf_chain_free(live);
+    for (uint32_t i = 0; i < st->retired_n; i++)
+        eqf_chain_free(st->retired[i]);
+    pthread_mutex_destroy(&st->reload_lock);
     return 0;
 }

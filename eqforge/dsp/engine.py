@@ -40,6 +40,35 @@ def _get_native(channels: int, sample_rate: int):
         return None
 
 
+def _render_backend(frames, process, channels: int, sample_rate: int,
+                    cfg: dict, latency: int, block: int,
+                    latency_compensate: bool) -> tuple[np.ndarray, int]:
+    """Shared block loop + latency compensation for both backends.
+
+    Both backends delay the signal by `latency` frames (look-ahead). To return a
+    render that is time-aligned *and* full length, append `latency` silent
+    frames to the input, process everything, then drop the first `latency`
+    output frames. Doing this identically for both backends means they stay
+    comparable sample-by-sample - the earlier fallback path simply sliced the
+    head off, which shifted its output `latency` frames earlier than native.
+    """
+    total_in = frames.shape[1]
+    pad = latency if latency_compensate else 0
+    padded = np.zeros((channels, total_in + pad), dtype=float)
+    padded[:, :total_in] = frames
+    out = np.zeros_like(padded)
+    pos = 0
+    while pos < padded.shape[1]:
+        n = min(block, padded.shape[1] - pos)
+        out[:, pos:pos + n] = process(padded[:, pos:pos + n])
+        pos += n
+    if pad:
+        out = out[:, latency:latency + total_in]
+    else:
+        out = out[:, :total_in]
+    return out, latency if latency_compensate else 0
+
+
 def render(data: np.ndarray, sample_rate: int, cfg: dict,
            block: int = BLOCK, latency_compensate: bool = True) -> RenderResult:
     """Process `data` ([channels, frames], any float dtype) with dsp config.
@@ -51,58 +80,47 @@ def render(data: np.ndarray, sample_rate: int, cfg: dict,
     x = np.asarray(data, dtype=np.float64)
     if x.ndim == 1:
         x = x[None, :]
-    channels, frames = x.shape
+    channels, frames_n = x.shape
     if channels > 16:
         raise ValueError(f"too many channels: {channels}")
+    if frames_n == 0:
+        return RenderResult(x.copy(), sample_rate, "native" if _native_ok()
+                            else "numpy", 0, 0, {})
 
     chain = _get_native(channels, sample_rate)
     if chain is not None:
         chain.set_fade(False)   # offline renders must be exact from sample 0
         chain.configure_json(json.dumps(cfg))
         latency = chain.latency_frames()
-        # Latency compensation: the chain delays the signal by `latency`
-        # frames. Feed the input followed by `latency` zero frames, then drop
-        # the first `latency` output frames: the result is time-aligned and
-        # full length.
-        pad = latency if latency_compensate else 0
-        buf = np.zeros((channels, frames + pad), dtype=np.float32)
-        buf[:, :frames] = x
-        out = np.zeros_like(buf)
-        total = frames + pad
-        pos = 0
-        while pos < total:
-            n = min(block, total - pos)
-            blk = np.ascontiguousarray(buf[:, pos:pos + n])
-            chain.process(blk)
-            out[:, pos:pos + n] = blk
-            pos += n
+
+        def _native_process(blk):
+            # the C ABI takes float32 planar buffers and mutates in place
+            f32 = np.ascontiguousarray(blk, dtype=np.float32)
+            chain.process(f32)
+            return f32.astype(np.float64)
+
+        out, trimmed = _render_backend(
+            x, _native_process, channels, sample_rate, cfg, latency, block,
+            latency_compensate)
         snap = chain.snapshot()
         chain.close()
-        if pad:
-            out = out[:, latency:latency + frames]
-        else:
-            out = out[:, :frames]
         return RenderResult(np.asarray(out, dtype=np.float64), sample_rate,
-                            "native", latency, latency, snap)
+                            "native", latency, trimmed, snap)
 
     from eqforge.dsp.fallback import FallbackChain
     fb = FallbackChain(channels, sample_rate)
     fb.configure_json(cfg)
-    chunks = []
-    pos = 0
-    while pos < frames:
-        n = min(block, frames - pos)
-        chunks.append(fb.process(x[:, pos:pos + n]))
-        pos += n
-    out = np.concatenate(chunks, axis=1) if chunks else x
     latency = fb.latency_frames
-    trimmed = 0
-    if latency_compensate and latency > 0 and out.shape[1] > latency:
-        out = out[:, latency:]
-        out = np.pad(out, ((0, 0), (0, latency)), mode="constant")
-        trimmed = latency
-    return RenderResult(out, sample_rate, "numpy", latency, trimmed,
-                        fb.snapshot())
+    out, trimmed = _render_backend(
+        x, fb.process, channels, sample_rate, cfg, latency, block,
+        latency_compensate)
+    return RenderResult(np.asarray(out, dtype=np.float64), sample_rate,
+                        "numpy", latency, trimmed, fb.snapshot())
+
+
+def _native_ok() -> bool:
+    from eqforge.native.loader import load
+    return load() is not None
 
 
 def measure_lufs(data: np.ndarray, sample_rate: int) -> float:

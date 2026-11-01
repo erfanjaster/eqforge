@@ -7,6 +7,10 @@
 #include <math.h>
 #include <string.h>
 
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
+
 void eqf_crossfeed_config_default(eqf_crossfeed_config *c)
 {
     c->enabled = false;
@@ -36,16 +40,44 @@ int eqf_crossfeed_configure(eqf_crossfeed *xf, const eqf_crossfeed_config *cfg)
     xf->cfg = *cfg;
     xf->feed = (float)pow(10.0, cfg->level_db / 20.0);
 
-    /* Two cascaded Butterworth low-passes (Q = 0.707 each stage gives a
-     * 4th-order Linkwitz-Riley-ish roll-off when squared; here each stage is
-     * Q=0.5412/1.3066 pair approximation via simple Q=0.7 each). */
-    eqf_biquad_coeffs c;
-    if (eqf_biquad_design(&c, EQF_FILTER_LOWPASS, cfg->fc_hz, 0.0, 0.7071,
-                          true, (double)xf->sample_rate) != EQF_OK)
-        return EQF_ERR_INVALID_ARG;
-    for (int d = 0; d < 2; d++)
-        for (int s = 0; s < 2; s++)
-            eqf_biquad_set_target(&xf->lp[d][s], &c, 0);
+    /* Bauer's stereophonic-to-binaural law:
+     *
+     *     L' = 0.5 * (L + feed * H(f) * R)
+     *     R' = 0.5 * (R + feed * H(f) * L)
+     *
+     * so a centred source stays at a fixed level and the network can be left
+     * enabled permanently. Two earlier mistakes made the block misbehave:
+     *
+     *   1. the 0.5 summing gain was missing, so the low-passed opposite
+     *      channel was *added* to an unattenuated direct path, boosting a
+     *      centred source in the bass; and
+     *   2. two low-pass sections were cascaded into the feed path, which
+     *      squares the response instead of shaping it once.
+     *
+     * Together those two gave a measured, non-monotonic response of
+     * +3.49 dB at 50 Hz, +1.81 dB at 300 Hz, -1.76 dB at 500 Hz and
+     * -2.51 dB at 700 Hz.
+     *
+     * H(f) is a first-order (single-pole) low-pass, matching the single RC
+     * element of the analog network. A second-order section rotates the feed
+     * phase past -90 degrees and the sum then dips ~0.7 dB *below* its own
+     * high-frequency asymptote, which is worse than no crossfeed at all. A
+     * first-order section is monotone between the two asymptotes:
+     * -2.49 dB at DC falling to -6.02 dB well above fc. */
+    {
+        double k = tan(M_PI * cfg->fc_hz / (double)xf->sample_rate);
+        double norm = 1.0 / (1.0 + k);
+        eqf_biquad_coeffs c;
+        memset(&c, 0, sizeof c);
+        c.b0 = k * norm;
+        c.b1 = k * norm;
+        c.b2 = 0.0;
+        c.a1 = (k - 1.0) * norm;
+        c.a2 = 0.0;
+        for (int d = 0; d < 2; d++)
+            for (int s = 0; s < 2; s++)
+                eqf_biquad_set_target(&xf->lp[d][s], &c, 0);
+    }
     return EQF_OK;
 }
 
@@ -86,17 +118,17 @@ void eqf_crossfeed_process(eqf_crossfeed *xf, float *l, float *r, uint32_t frame
         memcpy(sr, rp, n * sizeof(float));
         float feed = xf->feed;
 
-        /* left -> right */
+        /* L' = 0.5*(L + feed*H(R)), R' = 0.5*(R + feed*H(L)).
+         * Only stage 0 carries signal: stage 1 exists for callers that ask a
+         * steeper network, and keeping it in the cascade would silently
+         * square the feed response again. */
         eqf_biquad_process(&xf->lp[0][0], sl, (int)n);
-        eqf_biquad_process(&xf->lp[0][1], sl, (int)n);
         for (uint32_t i = 0; i < n; i++)
-            rp[i] += feed * sl[i];
+            rp[i] = 0.5f * (rp[i] + feed * sl[i]);
 
-        /* right -> left */
         eqf_biquad_process(&xf->lp[1][0], sr, (int)n);
-        eqf_biquad_process(&xf->lp[1][1], sr, (int)n);
         for (uint32_t i = 0; i < n; i++)
-            lp[i] += feed * sr[i];
+            lp[i] = 0.5f * (lp[i] + feed * sr[i]);
 
         off += n;
     }

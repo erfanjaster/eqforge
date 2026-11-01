@@ -21,8 +21,16 @@
  * SPDX-License-Identifier: MIT
  */
 
+#ifndef _POSIX_C_SOURCE
+#define _POSIX_C_SOURCE 200809L
+#endif
+
+#include <assert.h>
 #include <errno.h>
+#include <stdarg.h>
 #include <limits.h>
+#include <pthread.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -35,6 +43,7 @@
 #include <spa/param/audio/format-utils.h>
 #include <spa/param/format-utils.h>
 #include <spa/param/latency-utils.h>
+#include <spa/param/props.h>
 #include <spa/param/param.h>
 #include <spa/param/props.h>
 #include <spa/support/log.h>
@@ -47,10 +56,18 @@
 
 #include "eqforge/eqforge.h"
 
+#ifndef PATH_MAX
+#define PATH_MAX 4096
+#endif
+
 #define NAME "eqforge"
 #define FACTORY_NAME "eqforge.filter"
 #define DEFAULT_CONFIG_REL ".config/eqforge/active-dsp.json"
 #define MAX_FRAMES 8192
+
+/* Effect-specific SPA prop ids start after SPA_PROP_START_CUSTOM. */
+#define EQF_PROP_START (SPA_PROP_START_CUSTOM)
+#define EQF_PROP_bypass (EQF_PROP_START + 0)
 #define MAX_BUFFERS 64
 
 struct port {
@@ -70,18 +87,237 @@ struct impl {
     struct spa_audio_info_raw format;
     bool has_format;
 
-    uint8_t pod_buffer[8192];
+    /* spa_pod members include int64/uint64, so the builder requires 8-byte
+     * alignment. A bare uint8_t array only guarantees 1-byte alignment, which
+     * the SPA builder trips over (UB, and a real SIGBUS risk on strict-alignment
+     * targets). */
+    _Alignas(8) uint8_t pod_buffer[8192];
 
-    eqf_chain *chain;
+    /* Two chains are kept alive so a config change can be prepared off the
+     * audio thread and swapped in atomically (see impl_process). */
+    /* Ownership rules for chains, which exist because the data thread must
+     * never allocate or free:
+     *   - `chain` is published atomically. Only the control thread ever
+     *     writes it (during configure_format(), between data periods).
+     *   - `spare` is touched only by the control thread / watcher.
+     *   - `retired` lists chains the data thread has finished with; the
+     *     control thread frees them, so the RT thread never calls free().
+     *     Bounded: if it were ever full we refuse to stage rather than leak. */
+    _Atomic(eqf_chain *) chain;   /* what the data thread is processing */
+    _Atomic(eqf_chain *) chain_next; /* published, awaiting swap */
+    eqf_chain *spare;             /* being (re)configured off-thread */
+    /* Single-producer (data thread) / single-consumer (control) hand-off of
+     * chains awaiting free(). Monotonic counters, so a collector pass that
+     * races with a new retirement cannot lose an entry (a plain "reset
+     * counter to 0" scheme would drop it and leak the chain). */
+    eqf_chain *retired[8];
+    _Atomic uint32_t retired_head;   /* written by the data thread */
+    _Atomic uint32_t retired_tail;   /* written by the control thread */
     char config_path[PATH_MAX];
-    time_t config_mtime;
-    long reload_counter;
+    /* full-resolution (nanosecond) config stamp. Comparing only st_mtime gave
+     * one-second granularity, so a config rewritten in the same second as the
+     * previous load - exactly what happens when the daemon publishes a new
+     * active-dsp.json right after start-up - was silently ignored. */
+    struct timespec config_stamp;
+    long reload_counter;       /* audio-thread tick counter (no stat needed) */
+    long stat_counter;         /* stat() calls are only made every Nth tick */
+    _Atomic int swap_requested; /* set by the control thread when ready */
+    _Atomic int bypass_requested;
+    _Atomic bool bypass;
+
+    /* planar deinterleave scratch: no stack/VLA allocation in process() */
+    float tmp_in[EQF_MAX_CHANNELS][MAX_FRAMES];
+    float tmp_out[EQF_MAX_CHANNELS][MAX_FRAMES];
 
     uint32_t channels;
     uint32_t rate;
+    /* atomic mirrors read by the config watcher thread (which must not race
+     * with format negotiation on the main thread) */
+    _Atomic uint32_t cfg_channels;
+    _Atomic uint32_t cfg_rate;
+
+    /* ~2 Hz config watcher: does the stat() + parse + stage work off the data
+     * thread so process() never performs I/O or allocation. */
+    pthread_t watcher;
+    _Atomic bool watcher_run;
+    bool watcher_started;
 };
 
-static void impl_update_config(struct impl *this, bool force);
+static bool impl_update_config(struct impl *this, bool force);
+static inline void impl_apply_pending_swap(struct impl *this);
+static void impl_collect_retired(struct impl *this);
+
+/* Prepare a reconfigured chain in this->spare and ask the data thread to swap
+ * it in. Called from the control thread (or from process() as a last resort
+ * when the host gave us no other context) - never mutates `this->chain`, so
+ * the audio thread is never handed a half-built graph. */
+/* Hosts frequently pass no SPA log interface (the standalone smoke test, for
+ * instance). Without a fallback every diagnostic was silently discarded, which
+ * made a mis-configured node indistinguishable from a silent one. */
+static void eqf_log(struct impl *this, int level, const char *fmt, ...)
+{
+    va_list ap;
+    if (this->log) {
+        char buf[512];
+        va_start(ap, fmt);
+        vsnprintf(buf, sizeof(buf), fmt, ap);
+        va_end(ap);
+        if (level <= 1)
+            spa_log_error(this->log, NAME ": %s", buf);
+        else if (level == 2)
+            spa_log_warn(this->log, NAME ": %s", buf);
+        else
+            spa_log_info(this->log, NAME ": %s", buf);
+        return;
+    }
+    if (getenv("EQFORGE_DEBUG")) {
+        va_start(ap, fmt);
+        fprintf(stderr, "eqforge: ");
+        vfprintf(stderr, fmt, ap);
+        fprintf(stderr, "\n");
+        va_end(ap);
+    }
+}
+
+static bool impl_update_config(struct impl *this, bool force)
+{
+    /* Note: this must NOT require this->chain. The very first configuration is
+     * staged before any live chain exists (configure_format() only allocates
+     * the spare), so an early return here left the node passing audio through
+     * unprocessed for its whole lifetime. */
+    if (this->config_path[0] == '\0')
+        return false;
+
+    struct stat st;
+    if (stat(this->config_path, &st) != 0)
+        return false;
+    if (!force && st.st_mtim.tv_sec == this->config_stamp.tv_sec &&
+        st.st_mtim.tv_nsec == this->config_stamp.tv_nsec)
+        return false;
+    this->config_stamp = st.st_mtim;
+
+    if (!this->spare) {
+        uint32_t ch = atomic_load(&this->cfg_channels);
+        uint32_t rate = atomic_load(&this->cfg_rate);
+        if (ch == 0)
+            ch = 2;
+        if (rate == 0)
+            rate = 48000;
+        this->spare = eqf_chain_new(ch, rate, MAX_FRAMES);
+        if (!this->spare) {
+            eqf_log(this, 1, "cannot allocate standby chain");
+            return false;
+        }
+    }
+    int rc = eqf_chain_configure_file(this->spare, this->config_path);
+    if (rc != EQF_OK) {
+        eqf_log(this, 1, "config '%s' rejected (%s): %s", this->config_path,
+                eqf_result_str(rc),
+                eqf_chain_last_error(this->spare) ?: "no detail");
+        return false;
+    }
+    /* Publish the freshly built chain for the data thread, then release-store
+     * the request flag. The chain is not referenced anywhere else afterwards. */
+    atomic_store_explicit(&this->chain_next, this->spare, memory_order_release);
+    this->spare = NULL;
+    atomic_store_explicit(&this->swap_requested, 1, memory_order_release);
+    eqf_log(this, 3, "config '%s' staged for swap", this->config_path);
+    return true;
+}
+
+/* Config watcher: the only thread that touches the filesystem after start-up.
+ * Polls the config file's mtime at ~2 Hz (stat is cheap, and it happens here,
+ * not in the data callback) and stages a rebuilt chain when it changes. */
+static void *config_watcher(void *arg)
+{
+    struct impl *this = (struct impl *)arg;
+    while (atomic_load(&this->watcher_run)) {
+        struct timespec ts = { .tv_sec = 0, .tv_nsec = 500000000 };
+        nanosleep(&ts, NULL);
+        impl_collect_retired(this);
+        if (atomic_load(&this->swap_requested))
+            continue;          /* previous reload not consumed yet */
+        impl_update_config(this, false);
+    }
+    return NULL;
+}
+
+static void watcher_start(struct impl *this)
+{
+    if (this->watcher_started || this->config_path[0] == '\0')
+        return;
+    atomic_store(&this->watcher_run, true);
+    if (pthread_create(&this->watcher, NULL, config_watcher, this) == 0) {
+        this->watcher_started = true;
+    } else {
+        atomic_store(&this->watcher_run, false);
+        eqf_log(this, 2, "cannot start config watcher; config changes need a "
+                 "node restart");
+    }
+}
+
+static void watcher_stop(struct impl *this)
+{
+    if (!this->watcher_started)
+        return;
+    atomic_store(&this->watcher_run, false);
+    pthread_join(this->watcher, NULL);
+    this->watcher_started = false;
+}
+
+/* Called on the audio thread: consume a staged configuration. This is a
+ * pointer swap plus one free() of the retired chain - the worst case is a
+ * bounded deallocation, no parsing, no I/O, no allocation. */
+static inline void impl_apply_pending_swap(struct impl *this)
+{
+    /* Called on the audio thread: no allocation, no free, no I/O. The new
+     * pointer was published by the control thread before swap_requested was
+     * raised (release store), so this acquire load observes a fully built
+     * chain. */
+    if (!atomic_load_explicit(&this->swap_requested, memory_order_acquire))
+        return;
+    eqf_chain *next = atomic_load_explicit(&this->chain_next,
+                                           memory_order_acquire);
+    if (!next)
+        return;
+    eqf_chain *old = atomic_exchange(&this->chain, next);
+    atomic_store_explicit(&this->chain_next, NULL, memory_order_release);
+    atomic_store_explicit(&this->swap_requested, 0, memory_order_release);
+    if (old) {
+        uint32_t head = atomic_load_explicit(&this->retired_head,
+                                             memory_order_relaxed);
+        uint32_t tail = atomic_load_explicit(&this->retired_tail,
+                                             memory_order_acquire);
+        if (head - tail >= SPA_N_ELEMENTS(this->retired)) {
+            /* Collector has not run for 8 swaps: the control thread is wedged.
+             * Freeing here is an RT violation but strictly better than leaking
+             * a chain every reload. */
+            eqf_chain_free(old);
+        } else {
+            this->retired[head % SPA_N_ELEMENTS(this->retired)] = old;
+            atomic_store_explicit(&this->retired_head, head + 1,
+                                  memory_order_release);
+        }
+    }
+}
+
+/* Control-thread side: free chains the data thread has released. Bounded and
+ * allocation-free; safe to call from the watcher every poll. */
+static void impl_collect_retired(struct impl *this)
+{
+    uint32_t head = atomic_load_explicit(&this->retired_head,
+                                         memory_order_acquire);
+    uint32_t tail = atomic_load_explicit(&this->retired_tail,
+                                         memory_order_relaxed);
+    while (tail != head) {
+        eqf_chain_free(this->retired[tail % SPA_N_ELEMENTS(this->retired)]);
+        this->retired[tail % SPA_N_ELEMENTS(this->retired)] = NULL;
+        tail++;
+    }
+    /* Only advance after the frees, so a producer that observes the new tail
+     * can never reuse a slot that is still being freed. */
+    atomic_store_explicit(&this->retired_tail, tail, memory_order_release);
+}
 
 /* ------------------------------------------------------------------ */
 
@@ -210,8 +446,9 @@ static int impl_enum_params(void *object, int seq, uint32_t id,
     case SPA_PARAM_Latency:
     {
         uint64_t ns = 0;
-        if (this->chain && this->rate > 0) {
-            uint32_t lat = eqf_chain_latency(this->chain);
+        eqf_chain *live = atomic_load(&this->chain);
+        if (live && this->rate > 0) {
+            uint32_t lat = eqf_chain_latency(live);
             ns = (uint64_t)lat * SPA_NSEC_PER_SEC / this->rate;
         }
         struct spa_latency_info latency =
@@ -247,17 +484,50 @@ static int impl_configure_format(struct impl *this,
     if (this->rate == 0)
         this->rate = 48000;
 
-    if (this->chain) {
-        eqf_chain_free(this->chain);
-        this->chain = NULL;
+    /* Format negotiation happens on the control/main thread, before or
+     * between data-loop periods, so rebuilding here is fine - but only the
+     * *spare* slot is rebuilt; the live chain is swapped in on the data
+     * thread so the RT thread never sees a partially configured graph.
+     * The previous live chain may still be in use by a data loop that has not
+     * yet run its swap, so it is retired through the collector rather than
+     * freed here.
+     * NOTE: concurrent impl_process() calls remain unsupported (as they were
+     * before this change) - a format renegotiation while a data loop is
+     * actively running is undefined for the whole module. */
+    impl_collect_retired(this);
+    if (this->spare) {
+        eqf_chain_free(this->spare);
+        this->spare = NULL;
     }
-    this->chain = eqf_chain_new(this->channels, this->rate, MAX_FRAMES);
-    if (!this->chain) {
-        if (this->log)
-            spa_log_error(this->log, NAME ": failed to allocate chain");
+    atomic_store(&this->swap_requested, 0);
+    atomic_store(&this->chain_next, NULL);
+
+    this->spare = eqf_chain_new(this->channels, this->rate, MAX_FRAMES);
+    if (!this->spare) {
+        eqf_log(this, 1, "failed to allocate chain (%u ch, %u Hz)",
+                this->channels, this->rate);
         return -ENOMEM;
     }
-    impl_update_config(this, true);
+    atomic_store(&this->cfg_channels, this->channels);
+    atomic_store(&this->cfg_rate, this->rate);
+    memset(&this->config_stamp, 0, sizeof(this->config_stamp));
+    this->config_stamp.tv_nsec = -1;  /* force a (re)load for the new format */
+    bool staged = impl_update_config(this, true);   /* may stage over `spare` */
+    if (!staged) {
+        /* No usable config file: publish the empty chain so the node still
+         * processes (pass-through) rather than running with a stale graph of
+         * the wrong channel count or sample rate. */
+        eqf_log(this, 2, "no usable config for %u ch @ %u Hz; "
+                "running pass-through", this->channels, this->rate);
+        atomic_store_explicit(&this->chain_next, this->spare,
+                              memory_order_release);
+        this->spare = NULL;
+        atomic_store_explicit(&this->swap_requested, 1, memory_order_release);
+    }
+    if (atomic_load(&this->swap_requested)) {
+        /* swap immediately: no data has flowed yet for this format */
+        impl_apply_pending_swap(this);
+    }
     this->has_format = true;
     return 0;
 }
@@ -276,6 +546,52 @@ static int parse_raw_format(const struct spa_pod *param,
     if (spa_format_audio_raw_parse(param, raw) < 0)
         return -EINVAL;
     return 0;
+}
+
+/* Apply SPA props. Supported today:
+ *   SPA_PROP_mute       - bypass processing entirely (true = pass through)
+ *   SPA_PROP_softMute   - same, for hosts that use the software mute flag
+ * Anything else in the pod is ignored (hosts routinely send a whole props
+ * object), but the pod must at least be a props object.
+ *
+ * Before this existed, SPA_PARAM_Props was accepted and thrown away, so a host
+ * could mute the node and hear no change - and the bypass field the audio
+ * thread reads was never written by anything at all. */
+static int impl_set_props(struct impl *this, const struct spa_pod *param)
+{
+    if (!spa_pod_is_object_type(param, SPA_TYPE_OBJECT_Props))
+        return -EINVAL;
+
+    const struct spa_pod_object *obj = (const struct spa_pod_object *)param;
+    const struct spa_pod_prop *p;
+    int rc = 0;
+
+    p = spa_pod_object_find_prop(obj, NULL, SPA_PROP_mute);
+    if (p) {
+        bool v = false;
+        if (spa_pod_get_bool(&p->value, &v) == 0)
+            atomic_store(&this->bypass_requested, v ? 1 : 0);
+        else
+            rc = -EINVAL;
+    }
+    p = spa_pod_object_find_prop(obj, NULL, SPA_PROP_softMute);
+    if (p) {
+        bool v = false;
+        if (spa_pod_get_bool(&p->value, &v) != 0)
+            rc = -EINVAL;
+        else if (!spa_pod_object_find_prop(obj, NULL, SPA_PROP_mute))
+            atomic_store(&this->bypass_requested, v ? 1 : 0);
+    }
+    /* An explicit effect-specific key takes precedence when present. */
+    p = spa_pod_object_find_prop(obj, NULL, EQF_PROP_bypass);
+    if (p) {
+        bool v = false;
+        if (spa_pod_get_bool(&p->value, &v) == 0)
+            atomic_store(&this->bypass_requested, v ? 1 : 0);
+        else
+            rc = -EINVAL;
+    }
+    return rc;
 }
 
 static int impl_set_param(void *object, uint32_t id, uint32_t flags,
@@ -299,8 +615,14 @@ static int impl_set_param(void *object, uint32_t id, uint32_t flags,
         return impl_configure_format(this, &raw);
     }
     case SPA_PARAM_Latency:
+        /* Read-only in this node: the latency follows the limiter look-ahead
+         * and is reported through enum_params. Accepting a set here without
+         * doing anything would be a silent lie. */
+        return -EINVAL;
+
     case SPA_PARAM_Props:
-        return 0;
+        return impl_set_props(this, param);
+
     default:
         return -ENOENT;
     }
@@ -457,8 +779,9 @@ static int impl_port_enum_params(void *object, int seq,
     case SPA_PARAM_ProcessLatency:
     {
         uint64_t ns = 0;
-        if (this->chain && this->rate > 0) {
-            uint32_t lat = eqf_chain_latency(this->chain);
+        eqf_chain *live = atomic_load(&this->chain);
+        if (live && this->rate > 0) {
+            uint32_t lat = eqf_chain_latency(live);
             ns = (uint64_t)lat * SPA_NSEC_PER_SEC / this->rate;
         }
         struct spa_latency_info latency =
@@ -548,31 +871,9 @@ static int impl_port_reuse_buffer(void *object, uint32_t port_id,
 
 /* ------------------------------------------------------------------ */
 
-static void impl_update_config(struct impl *this, bool force)
-{
-    if (!this->chain || this->config_path[0] == '\0')
-        return;
 
-    struct stat st;
-    if (stat(this->config_path, &st) != 0)
-        return;
-    if (!force && st.st_mtime == this->config_mtime)
-        return;
-    this->config_mtime = st.st_mtime;
-
-    int rc = eqf_chain_configure_file(this->chain, this->config_path);
-    if (rc != EQF_OK && this->log) {
-        const char *err = eqf_chain_last_error(this->chain);
-        spa_log_error(this->log, NAME ": config '%s' rejected (%s): %s",
-                      this->config_path, eqf_result_str(rc),
-                      err ? err : "no detail");
-    } else if (rc == EQF_OK && this->log) {
-        spa_log_info(this->log, NAME ": loaded config '%s'", this->config_path);
-    }
-}
-
-static int process_buffers(struct impl *this, struct spa_buffer *ib,
-                           struct spa_buffer *ob)
+static int process_buffers(struct impl *this, eqf_chain *chain,
+                           struct spa_buffer *ib, struct spa_buffer *ob)
 {
     uint32_t ch = this->channels;
     if (ch == 0 || ib->n_datas == 0 || ib->datas[0].chunk == NULL)
@@ -609,8 +910,8 @@ static int process_buffers(struct impl *this, struct spa_buffer *ib,
             ob->datas[c].chunk->size = frames * sizeof(float);
             ob->datas[c].chunk->stride = sizeof(float);
         }
-        if (this->chain) {
-            eqf_chain_process(this->chain, ip, op, frames);
+        if (chain) {
+            eqf_chain_process(chain, ip, op, frames);
         } else {
             for (uint32_t c = 0; c < ch; c++)
                 memmove(op[c], ip[c], frames * sizeof(float));
@@ -627,21 +928,23 @@ static int process_buffers(struct impl *this, struct spa_buffer *ib,
         ob->datas[0].chunk->offset = ib->datas[0].chunk->offset;
         ob->datas[0].chunk->size = frames * ch * sizeof(float);
         ob->datas[0].chunk->stride = sizeof(float);
-        if (this->chain) {
-            float tmp_in[EQF_MAX_CHANNELS][MAX_FRAMES];
-            float tmp_out[EQF_MAX_CHANNELS][MAX_FRAMES];
+        if (chain) {
+            /* Deinterleave into the node's preallocated scratch. The previous
+             * version put 1 MB of float arrays on the stack here, which is a
+             * stack-overflow hazard in a host thread and defeats the "no
+             * allocation in process()" guarantee. */
             float *ip[EQF_MAX_CHANNELS], *op[EQF_MAX_CHANNELS];
             for (uint32_t c = 0; c < ch; c++) {
-                ip[c] = tmp_in[c];
-                op[c] = tmp_out[c];
+                ip[c] = this->tmp_in[c];
+                op[c] = this->tmp_out[c];
             }
             for (uint32_t i = 0; i < frames; i++)
                 for (uint32_t c = 0; c < ch; c++)
-                    tmp_in[c][i] = src[i * ch + c];
-            eqf_chain_process(this->chain, ip, op, frames);
+                    ip[c][i] = src[i * ch + c];
+            eqf_chain_process(chain, ip, op, frames);
             for (uint32_t i = 0; i < frames; i++)
                 for (uint32_t c = 0; c < ch; c++)
-                    dst[i * ch + c] = tmp_out[c][i];
+                    dst[i * ch + c] = op[c][i];
         } else {
             memmove(dst, src, frames * ch * sizeof(float));
         }
@@ -660,10 +963,18 @@ static int impl_process(void *object)
     if (obi == NULL)
         return SPA_STATUS_HAVE_DATA;
 
-    /* periodic config reload (~1 Hz at quantum 1024/48k) */
-    if (--this->reload_counter <= 0) {
-        this->reload_counter = 47;
-        impl_update_config(this, false);
+    /* Consume a configuration staged by the control thread (pointer swap). */
+    impl_apply_pending_swap(this);
+    eqf_chain *chain = atomic_load_explicit(&this->chain, memory_order_acquire);
+
+    /* Propagate a props-driven mute onto the live chain. eqf_chain_set_bypass()
+     * starts a crossfade, so it must only be called on an edge - calling it
+     * every cycle would restart the fade forever and silence the node. */
+    bool want_bypass = atomic_load(&this->bypass_requested) != 0;
+    if (want_bypass != atomic_load(&this->bypass)) {
+        atomic_store(&this->bypass, want_bypass);
+        if (chain)
+            eqf_chain_set_bypass(chain, want_bypass);
     }
 
     if (ibi == NULL || ibi->buffer_id >= in->n_buffers) {
@@ -678,14 +989,15 @@ static int impl_process(void *object)
 
     if (obi->buffer_id < out->n_buffers && out->buffers[obi->buffer_id]) {
         /* dedicated output buffer */
-        if (process_buffers(this, inb, out->buffers[obi->buffer_id]) < 0)
+        if (process_buffers(this, chain, inb,
+                            out->buffers[obi->buffer_id]) < 0)
             obi->buffer_id = SPA_ID_INVALID;
         return SPA_STATUS_HAVE_DATA;
     }
 
     /* host provided no output buffer id: process in place and forward the
      * input buffer */
-    if (process_buffers(this, inb, inb) < 0) {
+    if (process_buffers(this, chain, inb, inb) < 0) {
         obi->buffer_id = SPA_ID_INVALID;
         return SPA_STATUS_HAVE_DATA;
     }
@@ -733,9 +1045,16 @@ static int impl_handle_get_interface(struct spa_handle *handle, const char *type
 static int impl_handle_clear(struct spa_handle *handle)
 {
     struct impl_handle *h = (struct impl_handle *)handle;
-    if (h->impl.chain) {
-        eqf_chain_free(h->impl.chain);
-        h->impl.chain = NULL;
+    watcher_stop(&h->impl);
+    impl_collect_retired(&h->impl);
+    eqf_chain *live = atomic_load(&h->impl.chain);
+    if (live) {
+        eqf_chain_free(live);
+        atomic_store(&h->impl.chain, NULL);
+    }
+    if (h->impl.spare) {
+        eqf_chain_free(h->impl.spare);
+        h->impl.spare = NULL;
     }
     return 0;
 }
@@ -789,9 +1108,15 @@ static int impl_factory_init(const struct spa_handle_factory *factory,
         else
             this->config_path[0] = '\0';
     }
-    if (this->log && this->config_path[0])
-        spa_log_info(this->log, NAME ": config path '%s'", this->config_path);
+    eqf_log(this, 3, "config path '%s'", this->config_path);
 
+    atomic_store(&this->cfg_channels, this->channels);
+    atomic_store(&this->cfg_rate, this->rate);
+    /* Start watching now: after the first format negotiation config_mtime is
+     * already current, so a watcher started later can only see subsequent
+     * changes - which is what we want, but the node may be created long before
+     * it is negotiated. */
+    watcher_start(this);
     return 0;
 }
 

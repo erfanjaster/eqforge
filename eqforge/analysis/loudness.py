@@ -52,7 +52,10 @@ def channel_weights(channels: int) -> np.ndarray:
 
 def k_weight(data: np.ndarray, sample_rate: int) -> np.ndarray:
     sos = k_weighting_sos(sample_rate)
-    return signal.sosfilt(sos, data, axis=-1)
+    d = np.asarray(data, dtype=np.float64)
+    if d.shape[-1] == 0:
+        return d
+    return signal.sosfilt(sos, d, axis=-1)
 
 
 def _block_loudness(data: np.ndarray, sample_rate: int, block_ms: float,
@@ -83,7 +86,10 @@ def _block_loudness(data: np.ndarray, sample_rate: int, block_ms: float,
 
 def momentary_loudness(data: np.ndarray, sample_rate: int) -> float:
     """Last-400ms momentary loudness of the whole buffer (offline use)."""
-    loud, _ = _block_loudness(data, sample_rate, 400.0, 100.0)
+    d = np.asarray(data)
+    if d.size == 0 or d.shape[-1] == 0:
+        return -70.0
+    loud, _ = _block_loudness(d, sample_rate, 400.0, 100.0)
     return float(loud[-1]) if len(loud) else -70.0
 
 
@@ -94,7 +100,10 @@ def short_term_loudness(data: np.ndarray, sample_rate: int) -> float:
 
 def integrated_loudness(data: np.ndarray, sample_rate: int) -> float:
     """Gated integrated loudness (LUFS) per BS.1770-4."""
-    loud, _ = _block_loudness(data, sample_rate, 400.0, 100.0)
+    d = np.asarray(data)
+    if d.size == 0 or d.shape[-1] == 0:
+        return -70.0
+    loud, _ = _block_loudness(d, sample_rate, 400.0, 100.0)
     if len(loud) == 0:
         return -70.0
     above = loud[np.isfinite(loud) & (loud > ABS_GATE_LUFS)]
@@ -112,7 +121,10 @@ def integrated_loudness(data: np.ndarray, sample_rate: int) -> float:
 
 def loudness_range(data: np.ndarray, sample_rate: int) -> float:
     """LRA in LU per EBU Tech 3342 (short-term blocks, gated, 10th-95th pct)."""
-    loud, _ = _block_loudness(data, sample_rate, 3000.0, 1000.0)
+    d = np.asarray(data)
+    if d.size == 0 or d.shape[-1] == 0:
+        return 0.0
+    loud, _ = _block_loudness(d, sample_rate, 3000.0, 1000.0)
     loud = loud[np.isfinite(loud)]
     if len(loud) < 3:
         return 0.0
@@ -147,9 +159,17 @@ def _polyphase_bank() -> np.ndarray:
 
 
 def true_peak(data: np.ndarray, sample_rate: int | None = None) -> float:
-    """Max true peak (linear) across channels via 4x interpolation."""
+    """Max true peak (linear) across channels via 4x interpolation.
+
+    Returns 0.0 for empty input (reductions over empty arrays raise in numpy,
+    which used to crash `eqforge analyze` on a zero-length file).
+    """
     del sample_rate  # interpolation factor is rate-independent here
     x = np.atleast_2d(np.asarray(data, dtype=np.float64))
+    if x.size == 0 or x.shape[1] == 0:
+        return 0.0
+    if not np.all(np.isfinite(x)):
+        x = np.nan_to_num(x, nan=0.0, posinf=1.0, neginf=-1.0)
     phases = _polyphase_bank()
     peak = float(np.max(np.abs(x))) if x.size else 0.0
     for c in range(x.shape[0]):
@@ -170,12 +190,18 @@ def true_peak_db(data: np.ndarray, sample_rate: int | None = None) -> float:
 
 
 def peak_db(data: np.ndarray) -> float:
-    p = float(np.max(np.abs(data))) if data.size else 0.0
+    d = np.asarray(data)
+    if d.size == 0:
+        return -np.inf
+    p = float(np.max(np.abs(np.nan_to_num(d, nan=0.0))))
     return 20.0 * np.log10(p) if p > 1e-12 else -np.inf
 
 
 def rms_db(data: np.ndarray) -> float:
-    r = float(np.sqrt(np.mean(np.square(data)))) if data.size else 0.0
+    d = np.asarray(data)
+    if d.size == 0:
+        return -np.inf
+    r = float(np.sqrt(np.mean(np.square(np.nan_to_num(d, nan=0.0)))))
     return 20.0 * np.log10(r) if r > 1e-12 else -np.inf
 
 

@@ -16,7 +16,9 @@ produces their content so it is reviewable before touching the system.
 """
 from __future__ import annotations
 
+import shutil
 import textwrap
+import time
 from pathlib import Path
 
 PIPEWIRE_CONF = """\
@@ -94,22 +96,63 @@ def render_systemd_unit(exec_path: str, socket_path: str,
                                 "config": config_path}
 
 
-def write_system_setup(paths_mod, exec_path: Path | None = None) -> list[Path]:
-    """Write conf + unit into XDG dirs; returns written files."""
+def _write_managed(path: Path, content: str) -> tuple[str, Path | None]:
+    """Write `content` to a path eqforge owns on behalf of the user.
+
+    Returns (status, backup_path) where status is one of:
+      "created"   - the file did not exist
+      "same"      - it already had exactly this content (nothing written)
+      "updated"   - it existed with different content; the old file is kept
+                    as "<name>.bak.<timestamp>" before being replaced
+
+    The previous behaviour overwrote an edited file with no recovery path,
+    which silently destroyed user changes to the PipeWire drop-in - a real
+    hazard because that file is documented as user-editable.
+    """
+    if path.exists():
+        existing = path.read_text()
+        if existing == content:
+            return "same", None
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        backup = path.with_name(f"{path.name}.bak.{stamp}")
+        # never clobber an existing backup from the same second
+        n = 1
+        while backup.exists():
+            backup = path.with_name(f"{path.name}.bak.{stamp}-{n}")
+            n += 1
+        shutil.copy2(path, backup)
+        path.write_text(content)
+        return "updated", backup
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content)
+    return "created", None
+
+
+def write_system_setup(paths_mod, exec_path: Path | None = None,
+                       results: list | None = None) -> list[Path]:
+    """Write conf + unit into XDG dirs; returns written files.
+
+    Existing files are backed up before being replaced (see _write_managed).
+    Pass `results` to receive (path, status, backup) tuples.
+    """
     written = []
     pw_dir = Path(paths_mod.home()) / ".config/pipewire/pipewire.conf.d"
     pw_dir.mkdir(parents=True, exist_ok=True)
     conf = pw_dir / "99-eqforge.conf"
-    conf.write_text(render_pipewire_conf(
-        str(paths_mod.active_dsp_file())))
+    status, backup = _write_managed(
+        conf, render_pipewire_conf(str(paths_mod.active_dsp_file())))
     written.append(conf)
+    if results is not None:
+        results.append((conf, status, backup))
 
     unit_dir = Path(paths_mod.home()) / ".config/systemd/user"
     unit_dir.mkdir(parents=True, exist_ok=True)
     unit = unit_dir / "eqforge-rt.service"
     exec_path = exec_path or Path("/usr/libexec/eqforge/eqforge-rt")
-    unit.write_text(render_systemd_unit(
-        str(exec_path), str(paths_mod.rt_socket()),
-        str(paths_mod.active_dsp_file())))
+    status, backup = _write_managed(
+        unit, render_systemd_unit(str(exec_path), str(paths_mod.rt_socket()),
+                                  str(paths_mod.active_dsp_file())))
     written.append(unit)
+    if results is not None:
+        results.append((unit, status, backup))
     return written

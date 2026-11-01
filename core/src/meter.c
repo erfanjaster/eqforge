@@ -147,6 +147,15 @@ void eqf_meter_update(eqf_meter *m, const float *const *chans, uint32_t frames)
     if (!m || !m->allocated || frames == 0)
         return;
 
+    /* NaN/Inf would poison the running window sum for the whole session. */
+    for (uint32_t c = 0; c < m->channels; c++) {
+        const float *x = chans[c];
+        for (uint32_t i = 0; i < frames; i++) {
+            if (!isfinite(x[i]))
+                return; /* refuse to measure garbage; keep last good block */
+        }
+    }
+
     /* per-block peak / RMS / clipping / true peak */
     for (uint32_t c = 0; c < m->channels; c++) {
         const float *x = chans[c];
@@ -205,7 +214,8 @@ void eqf_meter_update(eqf_meter *m, const float *const *chans, uint32_t frames)
             m->window_filled = m->window_len;
     }
 
-    if (m->window_filled > 0 && m->window_sum > 1e-12) {
+    if (m->window_filled > 0 && m->window_sum > 1e-12 &&
+        isfinite(m->window_sum)) {
         double mean = m->window_sum / (double)m->window_filled;
         m->momentary_lufs = (float)(-0.691 + 10.0 * log10(mean));
     } else {

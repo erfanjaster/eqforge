@@ -51,32 +51,44 @@ def resolve_profile(profile_id: str, loader) -> dict:
                                hint=f"chain so far: {' -> '.join(chain)}")
         if len(chain) > MAX_CHAIN_DEPTH:
             raise ProfileError("profile inheritance chain too deep")
+        # `seen` is the recursion *stack*, not a set of everything ever
+        # visited: it must be unwound on the way out, otherwise a shared
+        # ancestor (D extends B, C; both extend A) is reported as a cycle the
+        # second time it is legitimately reached through the other parent.
         seen.add(pid)
         chain.append(pid)
-        raw = loader(pid)
-        merged = dict(raw)
-        parents = raw.get("extends") or []
-        if parents:
-            base: dict = {}
-            for p in parents:
-                base = deep_merge(base, walk(p))
-            filters_op = (raw.get("eq") or {}).get("filters_op", "replace")
-            merged = deep_merge(base, raw)
-            if filters_op == "append":
-                parent_filters: list = []
+        try:
+            raw = loader(pid)
+            merged = dict(raw)
+            parents = raw.get("extends") or []
+            if parents:
+                base: dict = {}
                 for p in parents:
-                    # parents are already merged into base
-                    pass
-                base_filters = (base.get("eq") or {}).get("filters") or []
-                own_filters = (raw.get("eq") or {}).get("filters") or []
-                merged.setdefault("eq", {})["filters"] = \
-                    list(base_filters) + list(own_filters)
-                _ = parent_filters
-            else:
-                if raw.get("eq", {}).get("filters") is not None:
+                    base = deep_merge(base, walk(p))
+                filters_op = (raw.get("eq") or {}).get("filters_op", "replace")
+                merged = deep_merge(base, raw)
+                own = (raw.get("eq") or {}).get("filters")
+                # `own is None` means the child never mentioned bands, which is
+                # different from an explicit empty list - see the note in
+                # Profile.to_dict().
+                if filters_op == "append":
+                    base_filters = (base.get("eq") or {}).get("filters") or []
                     merged.setdefault("eq", {})["filters"] = \
-                        raw["eq"]["filters"]
-        return merged
+                        list(base_filters) + list(own or [])
+                elif own is not None:
+                    # An explicit (possibly empty) list is a deliberate
+                    # "replace" and is honoured as-is.
+                    merged.setdefault("eq", {})["filters"] = own
+                # else: the child did not mention bands at all, so the
+                # inherited ones stand. Every profile that comes out of the
+                # model serialises `"filters": []` whether or not the author
+                # said anything (see Profile.to_dict), so treating a bare []
+                # as "delete all inherited bands" silently wiped the whole EQ
+                # of anyone who wrote a child that only adjusted the preamp.
+            return merged
+        finally:
+            seen.discard(pid)
+            chain.pop()
 
     resolved = walk(profile_id)
     resolved.pop("extends", None)

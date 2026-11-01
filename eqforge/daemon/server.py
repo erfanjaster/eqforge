@@ -19,6 +19,7 @@ import socketserver
 import threading
 import time
 import traceback
+import urllib.parse
 from functools import partial
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -71,20 +72,48 @@ class Daemon:
         self.state.sync_rt()          # best effort; watcher retries
 
     # ---------------- RPC dispatch ----------------
+    @staticmethod
+    def _require_str(params: dict, key: str, what: str = "") -> str:
+        """Fetch a required string parameter or raise a clean RPC error.
+
+        Without this, `params["profile"]` on a malformed request raised
+        KeyError, which the HTTP layer turned into a 500 "internal: 'profile'"
+        - an unhelpful crash that also told a caller nothing about what to fix.
+        """
+        if key not in params:
+            raise EQForgeError(f"missing required parameter {key!r}"
+                               + (f" ({what})" if what else ""))
+        value = params[key]
+        if not isinstance(value, str) or not value.strip():
+            raise EQForgeError(f"parameter {key!r} must be a non-empty string")
+        return value
+
     def rpc(self, method: str, params: dict | None = None) -> dict:
+        if params is not None and not isinstance(params, dict):
+            raise EQForgeError("params must be a JSON object")
         params = params or {}
         st = self.state
         store = st.store
 
         if method == "ping":
-            return {"ok": True, "version": _version(), "rpc": RPC_VERSION}
+            return {"ok": True, "version": _version(), "rpc": RPC_VERSION,
+                    "pid": os.getpid()}
+
+        if method == "shutdown":
+            # Graceful stop. The reply is written by the connection handler
+            # before the event loop observes stop_event, so clients get a reply.
+            self.stop()
+            return {"ok": True, "stopping": True}
 
         if method == "status":
             return st.status()
 
         if method == "set_profile":
-            return st.set_profile(str(params["profile"]),
-                                  params.get("slot"))
+            slot = params.get("slot")
+            if slot is not None and not isinstance(slot, str):
+                raise EQForgeError("parameter 'slot' must be a string")
+            return st.set_profile(self._require_str(params, "profile"),
+                                  slot)
 
         if method == "bypass":
             if "value" in params:
@@ -98,21 +127,38 @@ class Daemon:
             return {"profiles": store.list_ids()}
 
         if method == "resolve_profile":
-            resolved = store.resolve_any(str(params["profile"]))
+            prof_id = self._require_str(params, "profile")
+            resolved = store.resolve_any(prof_id)
             from eqforge.profiles.resolve import to_dsp_config
             return {"resolved": resolved,
                     "dsp": to_dsp_config(resolved,
-                                         st._base_dir(str(params["profile"])))}
+                                         st._base_dir(prof_id))}
 
         if method == "save_profile":
             from eqforge.profiles.model import Profile
-            prof = Profile.from_dict(params["profile"])
-            path = store.save(prof)
+            if "profile" not in params:
+                raise EQForgeError("missing required parameter 'profile'")
+            raw = params["profile"]
+            if not isinstance(raw, dict):
+                raise EQForgeError("parameter 'profile' must be an object")
+            if not isinstance(raw.get("id"), str) or not raw["id"].strip():
+                raise EQForgeError("profile.id must be a non-empty string")
+            if not isinstance(raw.get("name"), str) or not raw["name"].strip():
+                raise EQForgeError("profile.name must be a non-empty string")
+            prof = Profile.from_dict(raw)
+            path = store.save(prof, raw=raw)
             self.bus.publish("profiles_changed", {})
-            return {"path": str(path)}
+            result: dict = {"path": str(path)}
+            # Surface non-fatal validation findings: a profile that saves but
+            # plays nothing (bands under the wrong key) must not look like a
+            # clean success.
+            warnings = [str(w) for w in getattr(store, "last_warnings", [])]
+            if warnings:
+                result["warnings"] = warnings
+            return result
 
         if method == "delete_profile":
-            store.delete(str(params["profile"]))
+            store.delete(self._require_str(params, "profile"))
             self.bus.publish("profiles_changed", {})
             return {"ok": True}
 
@@ -317,6 +363,13 @@ class Daemon:
             threading.Thread(target=httpd.shutdown, daemon=True).start()
             httpd.server_close()
             self._httpd = None
+        # Remove runtime artefacts immediately so the next start sees a clean
+        # slate even if this process is slow to unwind (stale-socket recovery).
+        for p in (paths.daemon_socket(), paths.gui_port_file()):
+            try:
+                p.unlink(missing_ok=True)
+            except OSError:
+                pass
 
     def run_forever(self, http: bool = True, port: int = 0) -> None:
         # fail fast if another daemon owns the socket, before opening HTTP
@@ -355,6 +408,45 @@ class HTTPHandler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):  # quiet; we log ourselves
         log.debug("http: " + fmt, *args)
 
+    # ---- origin policy ----
+    # The HTTP face of the daemon exposes mutating RPCs (profile edits, bypass,
+    # device changes) and has no authentication of its own. Sending
+    # `Access-Control-Allow-Origin: *` let ANY web page in the user's browser
+    # read responses from, and drive, a daemon on 127.0.0.1 - a cross-origin
+    # page could silently reconfigure audio or enumerate the user's profiles.
+    # Requests are now only branded as readable by same-origin pages (the
+    # bundled GUI) and by the loopback dev-server origins used when the GUI is
+    # served from a separate port.
+    _ALLOWED_ORIGIN_SUFFIXES = (".localhost", ".test")
+
+    def _origin_allowed(self) -> str | None:
+        """Return the Origin value to echo back, or None to send no CORS grant."""
+        origin = self.headers.get("Origin")
+        if not origin:
+            # Same-origin fetches and non-browser clients send no Origin; no
+            # CORS header is needed for them.
+            return None
+        try:
+            parsed = urllib.parse.urlsplit(origin)
+        except ValueError:
+            return None
+        host = (parsed.hostname or "").lower()
+        if host in ("127.0.0.1", "localhost", "::1"):
+            return origin
+        if any(host.endswith(sfx) for sfx in self._ALLOWED_ORIGIN_SUFFIXES):
+            return origin
+        return None
+
+    def _origin_rejected(self) -> bool:
+        """True when the request carries a cross-origin Origin we do not serve.
+
+        For a mutating request this is a hard rejection: without it a hostile
+        page can still fire-and-forget (a POST whose response it cannot read),
+        which is enough to change the user's audio configuration.
+        """
+        origin = self.headers.get("Origin")
+        return bool(origin) and self._origin_allowed() is None
+
     # ---- helpers ----
     def _send(self, code: int, body: bytes, ctype: str,
               extra: dict | None = None) -> None:
@@ -362,7 +454,13 @@ class HTTPHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
-        self.send_header("Access-Control-Allow-Origin", "*")
+        allow = self._origin_allowed()
+        if allow:
+            self.send_header("Access-Control-Allow-Origin", allow)
+            self.send_header("Vary", "Origin")
+        else:
+            # Explicitly deny for a browser that asked cross-origin.
+            self.send_header("Vary", "Origin")
         for k, v in (extra or {}).items():
             self.send_header(k, v)
         self.end_headers()
@@ -370,6 +468,15 @@ class HTTPHandler(BaseHTTPRequestHandler):
 
     def _json(self, obj, code: int = 200) -> None:
         self._send(code, json.dumps(obj).encode(), "application/json")
+
+    def do_OPTIONS(self):  # noqa: N802
+        """Preflight: only grant CORS to origins we would actually serve."""
+        allow = self._origin_allowed()
+        extra = {"Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+                 "Access-Control-Allow-Headers": "Content-Type"}
+        if allow is None:
+            return self._send(403, b"", "text/plain")
+        self._send(204, b"", "text/plain", extra)
 
     # ---- routes ----
     def do_GET(self):  # noqa: N802
@@ -384,6 +491,9 @@ class HTTPHandler(BaseHTTPRequestHandler):
         path = self.path.split("?", 1)[0]
         if not path.startswith("/api/"):
             return self._send(404, b"not found", "text/plain")
+        if self._origin_rejected():
+            return self._json({"ok": False,
+                               "error": "cross-origin request refused"}, 403)
         length = int(self.headers.get("Content-Length", 0))
         try:
             body = json.loads(self.rfile.read(length) or b"{}")
@@ -416,7 +526,10 @@ class HTTPHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-store")
         self.send_header("Connection", "keep-alive")
-        self.send_header("Access-Control-Allow-Origin", "*")
+        allow = self._origin_allowed()
+        if allow:
+            self.send_header("Access-Control-Allow-Origin", allow)
+        self.send_header("Vary", "Origin")
         self.end_headers()
         q = self.daemon.bus.subscribe()
         try:

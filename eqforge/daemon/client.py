@@ -83,27 +83,82 @@ def call(method: str, params: dict | None = None, timeout: float = 10.0,
                            "~/.local/state/eqforge/logs/")
 
 
-def stop_daemon() -> bool:
-    """Ask systemd or kill via pidfile-less socket probe (best effort)."""
+def pid_if_running(timeout: float = 0.5) -> int | None:
+    """Return the daemon PID if a live daemon answers on the socket."""
+    sock = paths.daemon_socket()
+    if not sock.exists():
+        return None
     try:
-        call("ping", autostart=False, timeout=1)
-    except DaemonError:
-        return False
-    # no dedicated stop RPC: signal the process owning the socket
-    try:
-        import signal
-        out = subprocess.run(["fuser", str(paths.daemon_socket())],
-                             capture_output=True, text=True, timeout=5)
-        pids = out.stdout.split()
-        for pid in pids:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+            s.settimeout(timeout)
+            s.connect(str(sock))
+            s.sendall(b'{"method":"ping"}\n')
+            data = s.recv(4096)
+        resp = json.loads(data.decode())
+        if resp.get("ok"):
+            pid = (resp.get("result") or {}).get("pid")
+            return int(pid) if pid else None
+        return None
+    except (OSError, ValueError):
+        return None
+
+
+def stop_daemon(timeout: float = 8.0) -> bool:
+    """Stop the daemon through its own RPC, falling back to a signal.
+
+    The previous implementation shelled out to `fuser`, which is not installed
+    on a stock Debian/Ubuntu system, so `eqforge daemon stop` silently did
+    nothing. The shutdown RPC is authoritative; the signal fallback only runs
+    when the RPC cannot be delivered but a PID is known from the ping reply.
+    """
+    import signal
+    import time as _time
+
+    pid = pid_if_running(timeout=1.0)
+    if pid is None:
+        # No live daemon. Clean up leftovers so the next start is not blocked.
+        for p in (paths.daemon_socket(), paths.gui_port_file()):
             try:
-                os.kill(int(pid), signal.SIGTERM)
-            except (ValueError, ProcessLookupError):
+                p.unlink(missing_ok=True)
+            except OSError:
                 pass
+        return False
+
+    try:
+        call("shutdown", autostart=False, timeout=2.0)
+    except DaemonError:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except (ProcessLookupError, PermissionError):
+            pass
+
+    def _alive(p: int) -> bool:
+        try:
+            os.kill(p, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
         return True
-    except (subprocess.SubprocessError, FileNotFoundError):
+
+    deadline = _time.time() + timeout
+    while _time.time() < deadline:
+        if not _alive(pid):
+            for p in (paths.daemon_socket(), paths.gui_port_file()):
+                try:
+                    p.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            return True
+        _time.sleep(0.05)
+
+    # Last resort: it accepted the RPC but did not exit.
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
         pass
-    return False
+    _time.sleep(0.2)
+    return not _alive(pid)
 
 
 def http_base() -> str | None:

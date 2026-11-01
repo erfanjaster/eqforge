@@ -29,6 +29,10 @@ def design_biquad(filter_type: str, freq: float, gain_db: float, q: float,
 
     if use_q is None:
         use_q = filter_type not in ("lowshelf", "highshelf")
+
+    # NOTE: this is the authoritative shape rule and the native parser in
+    # core/src/chain.c mirrors it exactly. Callers that have a band dict should
+    # go through band_shape() below rather than guessing.
     if not use_q and 0.0 < q <= 1.0:
         alpha = sw0 / 2.0 * np.sqrt((A + 1.0 / A) * (1.0 / q - 1.0) + 2.0)
     else:
@@ -99,9 +103,35 @@ def filter_bank_response(filters: list[dict], freqs: np.ndarray,
     for f in filters:
         if not f.get("enabled", True):
             continue
+        shape, use_q = band_shape(f)
         b, a = design_biquad(
             f.get("type", "peak"), f.get("freq", 1000.0),
-            f.get("gain_db", 0.0), f.get("q", 1.0), sample_rate,
-            use_q=f.get("use_q"))
+            f.get("gain_db", 0.0), shape, sample_rate,
+            use_q=use_q)
         resp *= magnitude_response(b, a, freqs, sample_rate)
     return resp
+
+
+def band_shape(band: dict) -> tuple[float, bool]:
+    """Return (shape_value, use_q) for a filter band, matching the native core.
+
+    Rule (identical to core/src/chain.c):
+      1. an explicit ``use_q`` wins;
+      2. otherwise an explicit ``slope`` means shelf-slope semantics;
+      3. otherwise shelves default to slope, everything else to Q.
+    The shape value comes from whichever field was supplied, so a stray ``q``
+    on a shelf is never silently reinterpreted as a slope or vice versa.
+    """
+    ftype = band.get("type", "peak")
+    is_shelf = ftype in ("lowshelf", "highshelf")
+    has_slope = "slope" in band
+    explicit = band.get("use_q")
+    if explicit is None:
+        use_q = False if has_slope else not is_shelf
+    else:
+        use_q = bool(explicit)
+    if use_q:
+        return float(band.get("q", 1.0)), True
+    if has_slope:
+        return float(band["slope"]), False
+    return float(band.get("q", 0.71)), False

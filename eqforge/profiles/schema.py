@@ -74,6 +74,28 @@ def validate_profile(d: dict) -> list[Issue]:
                 issues.append(Issue("error", "/preamp/gain_db",
                                     f"out of range (-60..60): {g}"))
 
+    # A band list under the wrong key is the single easiest way to lose a whole
+    # EQ without any error: the profile saves, resolves, and plays nothing.
+    # Unknown keys are still accepted (forward compatibility), but a filter
+    # list parked somewhere the model will never read deserves a warning.
+    _FILTERISH = {"filter", "bands", "band", "eq_filters", "equalizer"}
+    for key in d:
+        if key in ("eq", "filters", "analysis", "extra", "matching"):
+            continue
+        if key in _FILTERISH or (
+                isinstance(d.get(key), list) and d.get(key)
+                and isinstance(d[key][0], dict)
+                and {"type", "freq"} <= set(d[key][0])):
+            issues.append(Issue(
+                "warning", f"/{key}",
+                "looks like an EQ band list but is not read by the profile "
+                "model; bands belong under 'eq': {'filters': [...]}"))
+    if "filters" in d and isinstance(d["filters"], list) and d["filters"]:
+        issues.append(Issue(
+            "warning", "/filters",
+            "top-level 'filters' is ignored; put bands under "
+            "'eq': {'filters': [...]}"))
+
     eq = d.get("eq")
     if eq is not None:
         if not isinstance(eq, dict):

@@ -20,6 +20,7 @@
 #include "eqforge/chain.h"
 #include "eqforge/eqforge.h"
 
+#include "eqforge/atomics.h"
 #include "eqforge/json.h"
 
 #include <math.h>
@@ -58,7 +59,14 @@ struct eqf_chain {
     bool fading_in;
     bool fade_enabled;
 
+    /* Lock-free, torn-read-free publication of stats to other threads.
+     * A plain struct written by the audio thread and memcpy'd by a control
+     * thread races (and can return a mix of old and new fields). The seqlock
+     * costs the audio thread two relaxed stores and never blocks it. */
     eqf_chain_stats snap;
+    /* C11 atoms via <eqforge/atomics.h> so the same source also compiles as
+     * C++ (the C++ canary build caught a plain _Atomic here). */
+    EQF_ATOMIC(unsigned) snap_seq;
     char *config_copy;   /* current serialized config */
     char error[192];
 };
@@ -199,9 +207,30 @@ static int apply_config(eqf_chain *c, const eqf_json *root)
             double freq = eqf_json_obj_number(f, "freq", eqf_json_obj_number(f, "frequency", 1000.0));
             double gain = eqf_json_obj_number(f, "gain_db", eqf_json_obj_number(f, "gain", 0.0));
             double q = eqf_json_obj_number(f, "q", 1.0);
-            bool use_q = eqf_json_obj_bool(f, "use_q", true);
-            if (!use_q)
-                q = eqf_json_obj_number(f, "slope", 0.71);
+            /* Shelves default to *slope* semantics (cookbook S), matching the
+             * Python coefficient designer and the documented config schema.
+             * Defaulting to Q here made a shelf band with a "q" field mean
+             * something different in the native core than in the fallback
+             * reference: up to 0.15 dB of shape error at 6 kHz for a -2 dB
+             * shelf, and a different asymptotic shape in the transition band.
+             * `use_q: true` still opts into Q semantics explicitly. */
+            bool is_shelf = (t == EQF_FILTER_LOW_SHELF ||
+                             t == EQF_FILTER_HIGH_SHELF);
+            /* Single rule, shared with eqforge/dsp/coeffs.py:
+             *   1. an explicit "use_q" wins;
+             *   2. otherwise an explicit "slope" means shelf-slope semantics;
+             *   3. otherwise shelves default to slope, everything else to Q.
+             * The shape parameter is read from whichever field the caller
+             * supplied so `q` and `slope` are never silently interchanged. */
+            double slope = eqf_json_obj_number(f, "slope", 0.71);
+            bool has_slope = eqf_json_obj_has(f, "slope");
+            bool use_q = eqf_json_obj_bool(f, "use_q",
+                                           has_slope ? false : !is_shelf);
+            if (use_q) {
+                q = eqf_json_obj_number(f, "q", 1.0);
+            } else {
+                q = has_slope ? slope : eqf_json_obj_number(f, "q", slope);
+            }
             bool enabled = eqf_json_obj_bool(f, "enabled", true);
             const char *chs = eqf_json_obj_string(f, "channel", NULL);
             int ch = -1;
@@ -287,7 +316,13 @@ static int apply_config(eqf_chain *c, const eqf_json *root)
 
     /* ---- all parsed & validated: commit ---- */
 
-    if (eqf_eq_load(&c->eq, bands, n_bands, 20.0) != EQF_OK) {
+    /* Parameter ramps exist to make live knob moves click-free. Offline
+     * renderers disable the fade (eqf_chain_set_fade(c,false)) and therefore
+     * must also get ramp-free behaviour, otherwise the first 20 ms of every
+     * render differs from the steady-state transfer function and native/offline
+     * output stops being sample-exact. */
+    double ramp_ms = c->fade_enabled ? 20.0 : 0.0;
+    if (eqf_eq_load(&c->eq, bands, n_bands, ramp_ms) != EQF_OK) {
         set_err(c, "failed to load EQ bands");
         return EQF_ERR_STATE;
     }
@@ -375,6 +410,14 @@ int eqf_chain_configure_json(eqf_chain *c, const char *json, size_t len)
 {
     if (!c || !json)
         return EQF_ERR_INVALID_ARG;
+    /* len == 0 means "NUL-terminated, measure it", the same convention
+     * eqf_json_parse() uses. Storing `len` bytes verbatim made the cached
+     * config an empty string for the most common call shape, so
+     * eqf_chain_current_config() and every later re-design from the cached
+     * config (eqf_chain_set_sample_rate, eqf_chain_set_channels) silently
+     * lost the whole graph. */
+    if (len == 0)
+        len = strlen(json);
     eqf_json *doc = NULL;
     char perr[128] = { 0 };
     int rc = eqf_json_parse(json, len, &doc, perr, sizeof(perr));
@@ -456,23 +499,58 @@ int eqf_chain_set_channels(eqf_chain *c, uint32_t channels)
         return EQF_ERR_INVALID_ARG;
     if (channels == c->channels)
         return EQF_OK;
-    /* Rebuild everything for the new channel count. */
-    char *cfg = c->config_copy;
+    /* Rebuild everything for the new channel count.
+     *
+     * `cfg` must be an independent copy: eqf_chain_configure_json() on the new
+     * chain frees its *own* config_copy, so handing it the old chain's buffer
+     * had it free the string it was still reading from, and the trailing
+     * free(cfg) then double-freed it. The old buffer stays owned by `c` and is
+     * released as part of the swap below. */
     uint32_t sr = c->sample_rate, mb = c->max_block;
-    c->config_copy = NULL;
+    char *cfg = NULL;
+    if (c->config_copy) {
+        size_t n = strlen(c->config_copy);
+        cfg = (char *)malloc(n + 1);
+        if (!cfg)
+            return EQF_ERR_NO_MEMORY;
+        memcpy(cfg, c->config_copy, n + 1);
+    }
     eqf_chain *nc = eqf_chain_new(channels, sr, mb);
     if (!nc) {
-        c->config_copy = cfg;
+        free(cfg);
         return EQF_ERR_NO_MEMORY;
     }
-    if (cfg)
-        eqf_chain_configure_json(nc, cfg, strlen(cfg));
-    /* swap guts */
-    eqf_chain backup = *c;
-    *c = *nc;
-    *nc = backup;
-    eqf_chain_free(nc);
+    if (cfg && eqf_chain_configure_json(nc, cfg, strlen(cfg)) != EQF_OK) {
+        /* A band that parsed for the old chain can still fail here (e.g. a
+         * per-channel band referencing a channel that no longer exists), so
+         * build an unconfigured chain rather than leaving a half-applied one. */
+        eqf_chain_free(nc);
+        nc = eqf_chain_new(channels, sr, mb);
+        if (!nc) {
+            free(cfg);
+            return EQF_ERR_NO_MEMORY;
+        }
+    }
     free(cfg);
+    /* Swap guts.
+     * A plain `backup = *c` no longer works: the seqlock counter is an atomic,
+     * which is not copyable in C++. The counter is not payload - it is a
+     * per-object version tag - so each object keeps its own across the move,
+     * while every other member is exchanged byte for byte.
+     * Concurrency: like every other eqf_chain_* mutator, this must not run
+     * concurrently with eqf_chain_process() on the same chain; the caller
+     * (rthost, SPA module) builds a fresh chain instead of calling this when
+     * it needs to reconfigure a live graph. */
+    unsigned seq_c = EQF_ATOMIC_LOAD(&c->snap_seq, EQF_MO_RELAXED);
+    unsigned seq_nc = EQF_ATOMIC_LOAD(&nc->snap_seq, EQF_MO_RELAXED);
+    eqf_chain backup;
+    memcpy(&backup, c, sizeof backup);
+    memcpy(c, nc, sizeof *c);
+    memcpy(nc, &backup, sizeof backup);
+    EQF_ATOMIC_STORE(&c->snap_seq, seq_c, EQF_MO_RELAXED);
+    EQF_ATOMIC_STORE(&nc->snap_seq, seq_nc, EQF_MO_RELAXED);
+    /* frees the old (now swapped-out) state, including its config_copy */
+    eqf_chain_free(nc);
     return EQF_OK;
 }
 
@@ -503,12 +581,34 @@ uint32_t eqf_chain_latency(const eqf_chain *c)
 {
     if (!c)
         return 0;
+    /* eqf_limiter_latency() already returns 0 when the stage is bypassed, so
+     * a chain without a limiter reports no latency and needs no compensation. */
     return eqf_limiter_latency(&c->limiter);
 }
 
 const eqf_chain_stats *eqf_chain_snapshot(const eqf_chain *c)
 {
     return c ? &c->snap : NULL;
+}
+
+int eqf_chain_copy_stats(const eqf_chain *c, eqf_chain_stats *out)
+{
+    if (!c || !out)
+        return EQF_ERR_INVALID_ARG;
+    /* Seqlock read side: retry if the audio thread was mid-update. Bounded so
+     * a caller can never spin forever; if the bound is hit the caller gets a
+     * (possibly slightly stale) consistent copy, never a torn one. */
+    for (unsigned attempt = 0; attempt < 64; attempt++) {
+        unsigned s1 = EQF_ATOMIC_LOAD(&c->snap_seq, EQF_MO_ACQUIRE);
+        if (s1 & 1u)
+            continue;
+        memcpy(out, &c->snap, sizeof(*out));
+        EQF_ATOMIC_FENCE();
+        unsigned s2 = EQF_ATOMIC_LOAD(&c->snap_seq, EQF_MO_RELAXED);
+        if (s1 == s2)
+            return EQF_OK;
+    }
+    return EQF_ERR_STATE;
 }
 
 const eqf_chain_stats *eqf_chain_meters(const eqf_chain *c)
@@ -530,8 +630,19 @@ int eqf_chain_process(eqf_chain *c, float *const *in, float *const *out, uint32_
 {
     if (!c || !in || !out || frames == 0)
         return EQF_ERR_INVALID_ARG;
-    if (frames > c->max_block)
-        frames = c->max_block;
+    if (frames > c->max_block) {
+        /* Silently truncating here made callers believe the whole buffer had
+         * been processed (the tail came back untouched). Refuse instead. */
+        set_err(c, "block of %u frames exceeds max_block %u", frames,
+                c->max_block);
+        return EQF_ERR_INVALID_ARG;
+    }
+    for (uint32_t ch = 0; ch < c->channels; ch++) {
+        if (!in[ch] || !out[ch]) {
+            set_err(c, "null channel pointer");
+            return EQF_ERR_INVALID_ARG;
+        }
+    }
 
     const float *const *cin = (const float *const *)in;
     eqf_meter_update(&c->meter_in, cin, frames);
@@ -587,8 +698,11 @@ int eqf_chain_process(eqf_chain *c, float *const *in, float *const *out, uint32_
     const float *const *cout = (const float *const *)out;
     eqf_meter_update(&c->meter_out, cout, frames);
 
-    /* publish snapshot */
+    /* publish snapshot (seqlock write side; odd while in progress) */
     eqf_chain_stats *s = &c->snap;
+    unsigned seq = EQF_ATOMIC_LOAD(&c->snap_seq, EQF_MO_RELAXED);
+    EQF_ATOMIC_STORE(&c->snap_seq, seq + 1, EQF_MO_RELAXED);
+    EQF_ATOMIC_FENCE();
     for (uint32_t ch = 0; ch < c->channels; ch++) {
         s->in_peak[ch] = c->meter_in.peak[ch];
         s->in_rms[ch] = c->meter_in.rms[ch];
@@ -604,6 +718,8 @@ int eqf_chain_process(eqf_chain *c, float *const *in, float *const *out, uint32_
     s->out_clipped = c->meter_out.clipped;
     s->latency_frames = eqf_chain_latency(c);
     s->channels = c->channels;
+    EQF_ATOMIC_FENCE();
+    EQF_ATOMIC_STORE(&c->snap_seq, seq + 2, EQF_MO_RELAXED);
     return EQF_OK;
 }
 
