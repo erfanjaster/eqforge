@@ -1,0 +1,13 @@
+[Unit]
+Description=EQForge control daemon (profiles, GUI server, device watcher)
+After=pipewire.service
+Wants=pipewire.service
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/eqforge daemon run
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target

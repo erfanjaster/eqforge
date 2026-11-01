@@ -1,0 +1,95 @@
+-- EQForge WirePlumber policy example.
+--
+-- Install to: ~/.config/wireplumber/wireplumber.conf.d/50-eqforge.conf
+-- containing:
+--
+--   wireplumber.profiles = [ { name = "main", scripts = [ "50-eqforge.lua" ] } ]
+--
+-- What it does:
+--   1. tags the eqforge_filter node as the preferred default sink,
+--   2. links eqforge_filter outputs to the previous default physical sink,
+--   3. re-links when the physical sink changes (hot-plug).
+--
+-- This is an *example policy*: adapt node names to your setup. WirePlumber
+-- scripting API differs slightly between releases (0.4 vs 0.5); this targets
+-- the 0.4/0.5 lua scripting API available in PipeWire >= 0.3.60.
+
+local eqforge_name = "eqforge_filter"
+local physical_sink_id = nil
+
+function find_eqforge_sink()
+  for sink in ObjectManager({ "Node" }):iterate() do
+    local name = sink.properties["node.name"]
+    if name == eqforge_name then
+      return sink
+    end
+  end
+  return nil
+end
+
+function find_physical_sink()
+  -- any sink that is NOT eqforge and has an ALSA/bluez port
+  for sink in ObjectManager({ "Node" }):iterate() do
+    local props = sink.properties
+    if props["node.name"] ~= eqforge_name
+       and props["media.class"] == "Audio/Sink"
+       and (props["api.alsa.path"] or props["api.bluez5.address"]) then
+      return sink
+    end
+  end
+  return nil
+end
+
+function link_eqforge_to_physical()
+  local eq = find_eqforge_sink()
+  local phys = find_physical_sink()
+  if not eq or not phys then return end
+
+  -- connect each eqforge output port to the matching physical input port
+  local eq_ports = {}
+  for port in ObjectManager({ "Port" }):iterate() do
+    if port.properties["object.path"] and
+       port.properties["object.path"]:find(eq.properties["object.path"] .. ":", 1, true) and
+       port.properties["port.direction"] == "out" then
+      table.insert(eq_ports, port)
+    end
+  end
+  local phys_in = {}
+  for port in ObjectManager({ "Port" }):iterate() do
+    if port.properties["object.path"] and
+       port.properties["object.path"]:find(phys.properties["object.path"] .. ":", 1, true) and
+       port.properties["port.direction"] == "in" then
+      table.insert(phys_in, port)
+    end
+  end
+  for i, out_port in ipairs(eq_ports) do
+    local in_port = phys_in[i]
+    if in_port then
+      Link("link-port", {
+        ["link.input.port"] = in_port.properties["port.name"],
+        ["link.output.port"] = out_port.properties["port.name"],
+        ["link.input.node"] = phys.properties["node.id"],
+        ["link.output.node"] = eq.properties["node.id"],
+      }):activate(Feature.Proxy.BOUND, true, nil)
+    end
+  end
+
+  Log.info("EQForge: linked " .. eqforge_name .. " -> " ..
+           (phys.properties["node.description"] or phys.properties["node.name"]))
+end
+
+-- Prefer eqforge as default sink
+rule = Rule {
+  matches = { { { "node.name", "equals", eqforge_name } } },
+  apply = { { ["priority.session"] = 1200 } },
+}
+rule:activate()
+
+-- When the graph settles, wire things up
+om = ObjectManager { "Node" }
+om:connect("objects-added", function()
+  if find_eqforge_sink() then
+    link_eqforge_to_physical()
+  end
+end)
+om:activate()

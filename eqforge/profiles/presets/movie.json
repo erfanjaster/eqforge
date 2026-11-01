@@ -1,0 +1,61 @@
+{
+  "format": "eqforge.profile",
+  "format_version": 2,
+  "id": "movie",
+  "name": "Movie",
+  "description": "Cinema feel: extended bass, forward dialogue band, protected peaks for big dynamic swings.",
+  "tags": [
+    "movie",
+    "dialogue"
+  ],
+  "builtin": true,
+  "preamp": {
+    "mode": "auto"
+  },
+  "eq": {
+    "filters": [
+      {
+        "type": "lowshelf",
+        "freq": 60,
+        "gain_db": 3.5,
+        "q": 0.71,
+        "enabled": true,
+        "use_q": false,
+        "name": "LFE feel"
+      },
+      {
+        "type": "peak",
+        "freq": 1200,
+        "gain_db": 1.5,
+        "q": 1.0,
+        "enabled": true,
+        "name": "dialogue body"
+      },
+      {
+        "type": "peak",
+        "freq": 3200,
+        "gain_db": 2.0,
+        "q": 1.3,
+        "enabled": true,
+        "name": "dialogue presence"
+      },
+      {
+        "type": "highshelf",
+        "freq": 10000,
+        "gain_db": 1.5,
+        "q": 0.71,
+        "enabled": true,
+        "use_q": false,
+        "name": "effects air"
+      }
+    ]
+  },
+  "limiter": {
+    "enabled": true,
+    "ceiling_db": -1.5,
+    "attack_ms": 3.0,
+    "release_ms": 80.0,
+    "lookahead_ms": 2.0,
+    "knee_db": 4.0
+  }
+}

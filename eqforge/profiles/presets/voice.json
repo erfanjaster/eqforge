@@ -1,0 +1,69 @@
+{
+  "format": "eqforge.profile",
+  "format_version": 2,
+  "id": "voice",
+  "name": "Voice / Podcast",
+  "description": "Broadcast-style voice chain: rumble filter, presence lift and a gentle compressor to even out levels. Great for calls and recordings playback.",
+  "tags": [
+    "voice",
+    "podcast",
+    "calls"
+  ],
+  "builtin": true,
+  "preamp": {
+    "mode": "auto"
+  },
+  "eq": {
+    "filters": [
+      {
+        "type": "highpass",
+        "freq": 90,
+        "gain_db": 0.0,
+        "q": 0.707,
+        "enabled": true,
+        "name": "rumble"
+      },
+      {
+        "type": "peak",
+        "freq": 200,
+        "gain_db": -2.0,
+        "q": 1.0,
+        "enabled": true,
+        "name": "de-boom"
+      },
+      {
+        "type": "peak",
+        "freq": 3000,
+        "gain_db": 3.0,
+        "q": 1.2,
+        "enabled": true,
+        "name": "intelligibility"
+      },
+      {
+        "type": "peak",
+        "freq": 7000,
+        "gain_db": -1.5,
+        "q": 2.5,
+        "enabled": true,
+        "name": "de-ess"
+      }
+    ]
+  },
+  "limiter": {
+    "enabled": true,
+    "ceiling_db": -1.0,
+    "attack_ms": 5.0,
+    "release_ms": 60.0,
+    "lookahead_ms": 1.5,
+    "knee_db": 3.0
+  },
+  "compressor": {
+    "enabled": true,
+    "threshold_db": -24.0,
+    "ratio": 2.5,
+    "knee_db": 8.0,
+    "attack_ms": 8.0,
+    "release_ms": 140.0,
+    "makeup_db": 2.0
+  }
+}

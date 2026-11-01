@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>EQForge</title>
+<link rel="stylesheet" href="style.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%2314161c'/%3E%3Cpath d='M4 20 C 9 20, 10 9, 16 9 S 23 20, 28 20' stroke='%239ece6a' stroke-width='2.5' fill='none' stroke-linecap='round'/%3E%3C/svg%3E">
+</head>
+<body>
+<header id="topbar">
+  <div class="brand">
+    <svg width="26" height="26" viewBox="0 0 32 32"><rect width="32" height="32" rx="7" fill="#1c1f28"/><path d="M4 20 C 9 20, 10 9, 16 9 S 23 20, 28 20" stroke="#9ece6a" stroke-width="2.5" fill="none" stroke-linecap="round"/></svg>
+    <span class="brand-name">EQForge</span>
+    <span class="brand-sub" id="engine-badge" title="DSP backend">…</span>
+  </div>
+
+  <div class="top-controls">
+    <div class="pill-group" id="slot-group">
+      <button id="slot-a" class="pill" title="Activate slot A">A</button>
+      <button id="slot-b" class="pill" title="Activate slot B">B</button>
+    </div>
+    <select id="profile-select" title="Active profile"></select>
+    <button id="bypass-btn" class="pill danger-when-on" title="Bypass all processing (space)">Bypass</button>
+    <div class="status-dots">
+      <span id="dot-daemon" class="dot" title="daemon"></span>
+      <span id="dot-rt" class="dot" title="real-time engine"></span>
+      <span id="dot-pw" class="dot" title="PipeWire"></span>
+    </div>
+  </div>
+</header>
+
+<main>
+  <aside id="sidebar">
+    <nav class="tabs">
+      <button class="tab active" data-tab="profiles">Profiles</button>
+      <button class="tab" data-tab="analysis">Analysis</button>
+      <button class="tab" data-tab="system">System</button>
+    </nav>
+
+    <section id="tab-profiles" class="tab-body active">
+      <input id="profile-search" type="search" placeholder="filter profiles…">
+      <div id="profile-list" class="list"></div>
+      <div class="sidebar-actions">
+        <button id="new-profile" class="btn small">＋ New</button>
+        <button id="import-hint" class="btn small ghost" title="eqforge import &lt;file&gt;">Import…</button>
+      </div>
+    </section>
+
+    <section id="tab-analysis" class="tab-body">
+      <label class="file-drop" id="file-drop">
+        <input type="file" id="file-input" accept="audio/*" hidden>
+        <div class="file-drop-inner">
+          <div class="file-drop-icon">🎵</div>
+          <div>Enter a file path on this machine</div>
+          <input id="file-path" type="text" placeholder="/home/me/song.flac">
+          <button id="analyze-btn" class="btn primary small">Analyze</button>
+        </div>
+      </label>
+      <div id="analysis-result" class="analysis-result"></div>
+    </section>
+
+    <section id="tab-system" class="tab-body">
+      <div class="sys-group">
+        <h3>Output device</h3>
+        <select id="device-select"></select>
+        <label class="checkbox-row">
+          <input type="checkbox" id="auto-switch"> Auto-switch profile per device
+        </label>
+        <div id="device-info" class="muted"></div>
+      </div>
+      <div class="sys-group">
+        <h3>Real-time engine</h3>
+        <div id="rt-info" class="muted">checking…</div>
+        <div class="sidebar-actions">
+          <button id="rt-start" class="btn small">Start system audio</button>
+        </div>
+      </div>
+      <div class="sys-group">
+        <h3>Application streams</h3>
+        <div id="stream-list" class="muted small-list"></div>
+      </div>
+    </section>
+  </aside>
+
+  <section id="content">
+    <div id="eq-panel">
+      <div class="panel-header">
+        <h2 id="profile-title">—</h2>
+        <div class="panel-actions">
+          <span id="dirty-flag" class="dirty" title="unsaved changes">●</span>
+          <button id="revert-btn" class="btn small ghost">Revert</button>
+          <button id="saveas-btn" class="btn small">Save as…</button>
+          <button id="save-btn" class="btn small primary">Save</button>
+        </div>
+      </div>
+      <canvas id="eq-canvas" height="360"></canvas>
+      <div class="eq-hints muted">drag a band to move it · scroll on a band to change Q · double-click empty space to add · <kbd>Del</kbd> removes the selected band</div>
+    </div>
+
+    <div id="bands-panel">
+      <table id="band-table">
+        <thead><tr>
+          <th>#</th><th>type</th><th>freq (Hz)</th><th>gain (dB)</th><th>Q</th><th>on</th><th></th>
+        </tr></thead>
+        <tbody></tbody>
+      </table>
+      <div class="chain-strip" id="chain-strip"></div>
+    </div>
+
+    <footer id="meter-bar">
+      <div class="meter-block">
+        <div class="meter-label">momentary</div>
+        <div class="meter-value" id="m-lufs">— LUFS</div>
+      </div>
+      <div class="meter-block grow">
+        <div class="meter-label">output</div>
+        <canvas id="meter-canvas" height="18"></canvas>
+      </div>
+      <div class="meter-block">
+        <div class="meter-label">limiter</div>
+        <div class="meter-value" id="m-lim">0.0 dB</div>
+      </div>
+      <div class="meter-block">
+        <div class="meter-label">latency</div>
+        <div class="meter-value" id="m-latency">—</div>
+      </div>
+      <div class="meter-block">
+        <div class="meter-label">preamp</div>
+        <div class="meter-value" id="m-preamp">—</div>
+      </div>
+    </footer>
+  </section>
+</main>
+
+<div id="toast-area"></div>
+<div id="modal-backdrop" class="hidden">
+  <div id="modal" class="modal">
+    <h3 id="modal-title">Save as</h3>
+    <div id="modal-body"></div>
+    <div class="modal-actions">
+      <button id="modal-cancel" class="btn ghost">Cancel</button>
+      <button id="modal-ok" class="btn primary">OK</button>
+    </div>
+  </div>
+</div>
+<script src="app.js"></script>
+</body>
+</html>

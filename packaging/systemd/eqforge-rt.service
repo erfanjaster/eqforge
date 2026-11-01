@@ -1,0 +1,14 @@
+[Unit]
+Description=EQForge real-time audio host (JACK/PipeWire client)
+After=pipewire.service
+Wants=pipewire.service
+
+[Service]
+Type=simple
+ExecStart=/usr/libexec/eqforge/eqforge-rt --name eqforge --config %h/.config/eqforge/active-dsp.json
+Restart=on-failure
+RestartSec=2
+Nice=-11
+
+[Install]
+WantedBy=default.target

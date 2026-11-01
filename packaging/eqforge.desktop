@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=EQForge
+GenericName=Audio Equalizer
+Comment=Profile-driven smart audio processing
+Exec=eqforge gui
+Icon=audio-equalizer
+Terminal=false
+Categories=AudioVideo;Audio;Mixer;
+Keywords=audio;equalizer;eq;pipewire;lufs;loudness;dsp;
+StartupNotify=false

@@ -1,0 +1,29 @@
+# build artifacts
+core/build/
+pipewire/build/
+rthost/build/
+build/
+dist/
+*.egg-info/
+*.so
+*.o
+*.a
+
+# python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# runtime state (never commit user data)
+active-dsp.json
+*.sock
+gui.port
+
+# editors / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store

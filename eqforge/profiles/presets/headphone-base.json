@@ -1,0 +1,54 @@
+{
+  "format": "eqforge.profile",
+  "format_version": 2,
+  "id": "headphone-base",
+  "name": "Headphone Base (Harman-ish)",
+  "description": "A gentle Harman-target-inspired base for headphones: moderate bass shelf and relaxed treble. Designed to be extended by per-headphone AutoEQ corrections (use 'extends').",
+  "tags": [
+    "headphone",
+    "harman",
+    "base"
+  ],
+  "builtin": true,
+  "preamp": {
+    "mode": "auto"
+  },
+  "eq": {
+    "filters": [
+      {
+        "type": "lowshelf",
+        "freq": 105,
+        "gain_db": 4.5,
+        "q": 0.9,
+        "enabled": true,
+        "use_q": false,
+        "name": "harman bass"
+      },
+      {
+        "type": "peak",
+        "freq": 2800,
+        "gain_db": -1.0,
+        "q": 1.5,
+        "enabled": true,
+        "name": "ear resonance ease"
+      },
+      {
+        "type": "highshelf",
+        "freq": 9500,
+        "gain_db": -1.5,
+        "q": 0.7,
+        "enabled": true,
+        "use_q": false,
+        "name": "treble relax"
+      }
+    ]
+  },
+  "limiter": {
+    "enabled": true,
+    "ceiling_db": -1.0,
+    "attack_ms": 5.0,
+    "release_ms": 60.0,
+    "lookahead_ms": 1.5,
+    "knee_db": 3.0
+  }
+}

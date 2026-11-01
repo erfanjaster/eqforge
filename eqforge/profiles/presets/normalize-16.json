@@ -1,0 +1,31 @@
+{
+  "format": "eqforge.profile",
+  "format_version": 2,
+  "id": "normalize-16",
+  "name": "Normalize to -16 LUFS (file workflow)",
+  "description": "For offline file processing: normalizes loudness to -16 LUFS (streaming-standard-ish) with -1 dBTP true-peak ceiling. EQ is flat.",
+  "tags": [
+    "file",
+    "loudness",
+    "normalize"
+  ],
+  "builtin": true,
+  "preamp": {
+    "mode": "auto"
+  },
+  "eq": {
+    "filters": []
+  },
+  "limiter": {
+    "enabled": true,
+    "ceiling_db": -1.0,
+    "attack_ms": 5.0,
+    "release_ms": 60.0,
+    "lookahead_ms": 1.5,
+    "knee_db": 3.0
+  },
+  "loudness": {
+    "target_lufs": -16.0,
+    "true_peak_db": -1.0
+  }
+}

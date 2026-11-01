@@ -1,0 +1,54 @@
+{
+  "format": "eqforge.profile",
+  "format_version": 2,
+  "id": "late-night",
+  "name": "Late Night",
+  "description": "Neighbor-friendly: strong compression flattens explosions and loud passages, bass is reduced (walls carry it), overall level stays low.",
+  "tags": [
+    "quiet",
+    "night",
+    "compressed"
+  ],
+  "builtin": true,
+  "preamp": {
+    "mode": "auto"
+  },
+  "eq": {
+    "filters": [
+      {
+        "type": "lowshelf",
+        "freq": 110,
+        "gain_db": -4.0,
+        "q": 0.71,
+        "enabled": true,
+        "use_q": false,
+        "name": "bass reduction"
+      },
+      {
+        "type": "peak",
+        "freq": 3000,
+        "gain_db": 1.5,
+        "q": 1.2,
+        "enabled": true,
+        "name": "dialog lift"
+      }
+    ]
+  },
+  "limiter": {
+    "enabled": true,
+    "ceiling_db": -3.0,
+    "attack_ms": 5.0,
+    "release_ms": 100.0,
+    "lookahead_ms": 1.5,
+    "knee_db": 3.0
+  },
+  "compressor": {
+    "enabled": true,
+    "threshold_db": -28.0,
+    "ratio": 6.0,
+    "knee_db": 10.0,
+    "attack_ms": 5.0,
+    "release_ms": 200.0,
+    "makeup_db": 4.0
+  }
+}

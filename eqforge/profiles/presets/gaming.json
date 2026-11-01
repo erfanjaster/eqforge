@@ -1,0 +1,67 @@
+{
+  "format": "eqforge.profile",
+  "format_version": 2,
+  "id": "gaming",
+  "name": "Gaming",
+  "description": "Competitive tuning: controlled bass so explosions don't mask details, boosted upper-mids for footsteps and reload cues, wider dynamic safety.",
+  "tags": [
+    "gaming",
+    "fps"
+  ],
+  "builtin": true,
+  "preamp": {
+    "mode": "auto"
+  },
+  "eq": {
+    "filters": [
+      {
+        "type": "highpass",
+        "freq": 40,
+        "gain_db": 0.0,
+        "q": 0.707,
+        "enabled": true,
+        "name": "sub rumble cut"
+      },
+      {
+        "type": "peak",
+        "freq": 120,
+        "gain_db": -2.0,
+        "q": 1.0,
+        "enabled": true,
+        "name": "explosion control"
+      },
+      {
+        "type": "peak",
+        "freq": 2400,
+        "gain_db": 3.0,
+        "q": 1.5,
+        "enabled": true,
+        "name": "footsteps"
+      },
+      {
+        "type": "peak",
+        "freq": 5200,
+        "gain_db": 1.5,
+        "q": 1.8,
+        "enabled": true,
+        "name": "detail"
+      },
+      {
+        "type": "peak",
+        "freq": 8000,
+        "gain_db": -1.0,
+        "q": 2.0,
+        "enabled": true,
+        "name": "anti-hiss"
+      }
+    ]
+  },
+  "limiter": {
+    "enabled": true,
+    "ceiling_db": -1.0,
+    "attack_ms": 5.0,
+    "release_ms": 60.0,
+    "lookahead_ms": 1.5,
+    "knee_db": 3.0
+  }
+}
