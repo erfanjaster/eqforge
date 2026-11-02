@@ -11,7 +11,7 @@
  *    against the Python/numpy reference).
  *  - C11, written in a C++-compatible subset for a future native C++ port.
  *
- * SPDX-License-Identifier: MIT
+ * SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-EQForge-Commercial
  */
 #ifndef EQFORGE_H
 #define EQFORGE_H

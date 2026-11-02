@@ -33,11 +33,17 @@ def daemon_running(timeout: float = 0.5) -> bool:
         return False
 
 
-def spawn_daemon() -> None:
-    """Start a detached daemon process."""
+def spawn_daemon(extra_args: list[str] | None = None) -> None:
+    """Start a detached daemon process.
+
+    `extra_args` are appended to `daemon run`, so `eqforge daemon start
+    --auto-wire` actually reaches the process it spawns instead of being
+    accepted by the parser and dropped.
+    """
     paths.ensure_dirs()
     logf = open(paths.log_dir() / "daemon.out", "ab")
-    cmd = [sys.executable, "-m", "eqforge", "daemon", "run", "--foreground"]
+    cmd = [sys.executable, "-m", "eqforge", "daemon", "run", "--foreground",
+           *(extra_args or [])]
     env = dict(os.environ)
     env.setdefault("EQFORGE_DAEMONIZED", "1")
     subprocess.Popen(cmd, stdout=logf, stderr=logf, stdin=subprocess.DEVNULL,

@@ -1,8 +1,8 @@
 """CLI commands: runtime/system (devices, streams, status, daemon, gui, system, doctor)."""
 from __future__ import annotations
 
+import copy
 import json
-import os
 import shutil
 import subprocess
 import sys
@@ -11,7 +11,7 @@ from pathlib import Path
 
 from eqforge import paths
 from eqforge.cli import output as out
-from eqforge.errors import EQForgeError
+from eqforge.errors import EQForgeError, SystemError
 
 
 # ----------------------------------------------------------------- devices --
@@ -141,12 +141,35 @@ def cmd_ab(args) -> int:
 
 # ------------------------------------------------------------------ daemon --
 
+def _daemon_flags(args) -> list[str]:
+    """Flags that must reach the *spawned* daemon, not just this process.
+
+    `eqforge daemon start --auto-wire` used to be indistinguishable from
+    `eqforge daemon start`: the parser accepted the flag and the spawn
+    command line never carried it.
+    """
+    flags: list[str] = []
+    auto = getattr(args, "auto_wire", None)
+    if auto is True:
+        flags.append("--auto-wire")
+    elif auto is False:
+        flags.append("--no-auto-wire")
+    if getattr(args, "manage_rt", False):
+        flags.append("--manage-rt")
+    channels = getattr(args, "channels", None)
+    if channels:
+        flags += ["--channels", str(channels)]
+    return flags
+
+
 def cmd_daemon(args) -> int:
     from eqforge.daemon import client
     action = args.action
     if action == "run":
         from eqforge.daemon.server import Daemon
-        d = Daemon()
+        d = Daemon(auto_wire=getattr(args, "auto_wire", None),
+                   manage_rt=getattr(args, "manage_rt", False),
+                   rt_channels=getattr(args, "channels", None) or 2)
         if not args.no_http:
             d.serve_http(port=args.port or 0)
             base = client.http_base()
@@ -162,8 +185,11 @@ def cmd_daemon(args) -> int:
     if action == "start":
         if client.daemon_running():
             out.echo("  daemon already running")
+            out.echo(out.dim("    restart it to change --auto-wire/--manage-rt:"
+                             " eqforge daemon restart"))
             return 0
-        client.spawn_daemon()
+        flags = _daemon_flags(args)
+        client.spawn_daemon(flags)
         deadline = time.time() + 6
         while time.time() < deadline:
             if client.daemon_running():
@@ -171,6 +197,8 @@ def cmd_daemon(args) -> int:
                 base = client.http_base()
                 if base:
                     out.echo(out.dim(f"    GUI: {base}"))
+                if flags:
+                    out.echo(out.dim(f"    mode: {' '.join(flags)}"))
                 return 0
             time.sleep(0.2)
         raise EQForgeError("daemon did not come up in time",
@@ -184,7 +212,9 @@ def cmd_daemon(args) -> int:
     if action == "restart":
         client.stop_daemon()
         time.sleep(0.4)
-        return cmd_daemon(type("A", (), {"action": "start"})())
+        clone = copy.copy(args)          # keep the flags, change the action
+        clone.action = "start"
+        return cmd_daemon(clone)
     if action == "status":
         return cmd_status(args)
     raise EQForgeError(f"unknown daemon action {action!r}")
@@ -234,11 +264,15 @@ def cmd_system(args) -> int:
 
     if action == "setup":
         from eqforge.system.module_config import write_system_setup
+        # An unusable --rt-binary must not end up baked into the user's
+        # systemd unit as `ExecStart=.`; validate it, but allow setup to run
+        # before the host is built (then the packaged path is written).
+        if args.rt_binary:
+            exec_path = _resolve_rt_binary(args.rt_binary)
+        else:
+            exec_path = _rt_binary() or Path(_RT_SYSTEM_PATHS[0])
         results: list = []
-        written = write_system_setup(paths,
-                                     exec_path=Path(args.rt_binary)
-                                     if args.rt_binary else None,
-                                     results=results)
+        write_system_setup(paths, exec_path=exec_path, results=results)
         # Report what actually happened to each file. Saying "wrote" for a file
         # that was left alone (or silently replaced) is exactly the kind of
         # fake success a user cannot act on.
@@ -268,38 +302,30 @@ def cmd_system(args) -> int:
         return 0
 
     if action == "start":
-        rt = _rt_binary()
-        if rt is None:
-            raise EQForgeError(
-                "eqforge-rt binary not found",
-                hint="build it: make -C rthost && make -C rthost install, "
-                     "or pass --rt-binary PATH")
+        rt = _resolve_rt_binary(getattr(args, "rt_binary", None))
         sock = paths.rt_socket()
         if sock.exists():
-            r = client.call("rt_command", {"cmd": {"cmd": "status"}})
-            if r.get("rt", {}).get("ok"):
-                out.echo("  rt host already running")
+            r = client.call("rt_command", {"cmd": {"cmd": "status"}},
+                            autostart=False) \
+                if client.daemon_running() else None
+            if (r or {}).get("rt", {}).get("ok"):
+                out.echo(f"  rt host already running ({out.cyan(str(rt))})")
                 return 0
-            sock.unlink(missing_ok=True)
-        paths.ensure_dirs()
-        cfg = paths.active_dsp_file()
+            sock.unlink(missing_ok=True)   # stale socket from a dead host
         if not client.daemon_running():
             client.spawn_daemon()
             time.sleep(0.5)
         client.call("status")  # ensures active-dsp.json exists
-        logfile = open(paths.log_dir() / "rt.out", "ab")
-        cmd = [str(rt), "--name", "eqforge", "--socket", str(sock),
-               "--config", str(cfg), "--channels", str(args.channels or 2)]
-        proc = subprocess.Popen(cmd, stdout=logfile, stderr=logfile,
-                                start_new_session=True,
-                                stdin=subprocess.DEVNULL)
-        deadline = time.time() + 5
-        while time.time() < deadline and not sock.exists():
-            time.sleep(0.1)
-        if proc.poll() is not None or not sock.exists():
-            raise EQForgeError("rt host failed to start",
-                               hint=f"see {paths.log_dir() / 'rt.out'}")
-        out.echo(f"  {out.green('✓')} eqforge-rt running (pid {proc.pid})")
+        # Launching (path resolution, the pw-jack wrapper, fd handling, the
+        # wait for the control socket and the failure diagnosis) lives in
+        # eqforge.system.rthost so the daemon's --manage-rt supervision and
+        # this command cannot drift apart.
+        launched = _rthost.start(rt_binary=rt, channels=args.channels or 2)
+        out.echo(f"  {out.green('✓')} eqforge-rt running (pid {launched.pid})")
+        note = f"    host: {launched.rt}"
+        if launched.wrapper:
+            note += f"  (via {Path(launched.wrapper[0]).name})"
+        out.echo(out.dim(note))
         if args.manage:
             _wire_rt(client)
         return 0
@@ -339,122 +365,278 @@ def cmd_system(args) -> int:
         _wire_rt(client)
         return 0
 
+    if action == "autostart":
+        return cmd_autostart(args)
+
     raise EQForgeError(f"unknown system action {action!r}")
 
 
-def _rt_binary() -> Path | None:
-    for cand in (Path(os.environ.get("EQFORGE_RT", "")),
-                 Path(__file__).resolve().parents[2] / "rthost/build/eqforge-rt",
-                 Path("/usr/libexec/eqforge/eqforge-rt"),
-                 Path("/usr/local/libexec/eqforge/eqforge-rt")):
-        if cand and cand.exists() and os.access(cand, os.X_OK):
-            return cand
-    which = shutil.which("eqforge-rt")
-    return Path(which) if which else None
+# rt-host location/launch machinery lives in eqforge.system.rthost so the
+# daemon can use exactly the same code as the CLI. Aliased here for the
+# command implementations (and their tests) below.
+from eqforge.system import rthost as _rthost          # noqa: E402
+
+_RT_SYSTEM_PATHS = _rthost.SYSTEM_PATHS
+_is_executable_file = _rthost.is_executable_file
+_in_tree_rt = _rthost.in_tree_rt
+_rt_candidates = _rthost.candidates
+_rt_binary = _rthost.find_binary
+_resolve_rt_binary = _rthost.resolve_binary
+_log_tail = _rthost.log_tail
+_exec_hint = _rthost.exec_hint
+_most_useful = _rthost.most_useful
+_rt_start_failure = _rthost.start_failure
 
 
 def _wire_rt(client) -> None:
-    """Policy-wire the rt host into the graph (full chain, best effort).
+    """Policy-wire the rt host into the graph.
 
-    1. connects rt-host outputs -> default sink playback ports, and
-    2. moves application playback streams that currently feed the default
-       sink onto the rt-host inputs, so audio actually flows
-       app -> eqforge -> sink.
-    Idempotent: already-correct links are skipped.
+    The algorithm lives in `eqforge.system.wiring` so the daemon's automatic
+    re-wiring and this manual command can never drift apart.
     """
-    from eqforge.system import pipewire as pw
-    sink_name = pw.default_sink()
-    if not sink_name:
-        out.echo(out.yellow("  no default sink to wire to"))
-        return
-    sink = next((d for d in pw.list_devices() if d.node_name == sink_name),
-                None)
-    if sink is None:
-        out.echo(out.yellow(f"  default sink {sink_name!r} not in graph"))
-        return
-    r = client.call("rt_command", {"cmd": {"cmd": "status"}}, autostart=False)
-    rt = (r or {}).get("rt") or {}
-    if not rt.get("ok"):
+    from eqforge.system import wiring
+
+    def rt_command(cmd: dict) -> dict | None:
+        r = client.call("rt_command", {"cmd": cmd}, autostart=False)
+        return (r or {}).get("rt")
+
+    report = wiring.wire_graph(rt_command, echo=out.echo)
+
+    for err in report.errors:
+        out.echo(out.yellow(f"  ! {err}"))
+    if report.sink is None:
+        if report.errors and not report.notes:
+            raise SystemError(report.errors[0])
+        return                              # wiring already said why
+    if report.rt_node is None:
         raise EQForgeError("rt host not running",
                            hint="eqforge system start   "
                                 "(or systemctl --user start eqforge-rt)")
-    rt_node = str(rt.get("client", "eqforge"))
-    channels = int(rt.get("channels", 2) or 2)
+    out.echo(f"  rt outputs \u2192 {report.sink} "
+             f"({report.outputs_ok} connections)")
+    out.echo(f"  streams \u2192 rt inputs "
+             f"({report.streams_moved} new, {report.already_wired} already wired)")
+    if not report.changed and report.skipped:
+        out.echo(out.dim(f"  {report.skipped} stream(s) left on their current "
+                         "target on purpose"))
+    for note in report.notes:
+        out.echo(out.dim(f"  note: {note}"))
+    if report.errors and not report.changed:
+        raise SystemError(report.errors[0],
+                          hint="pw-link could not complete the rewiring")
 
-    names = pw.node_ports(sink.id, "input")
-    full = pw.node_port_targets(sink.id, "input", sink_name)
-    pairs = [(n, f) for n, f in zip(names, full)
-             if not n.startswith("monitor")]
-    playback = [n for n, _ in pairs]
-    targets = [f for _, f in pairs]
-    if not playback:
-        playback = [f"playback_{s}" for s in ("FL", "FR", "FC", "LFE")]
-        targets = [f"{sink_name}:{p}" for p in playback]
-    playback = playback[:channels]
-    targets = targets[:channels]
 
-    # 1) rt outputs -> sink playback ports (handled inside the rt host)
-    r = client.call("rt_command",
-                    {"cmd": {"cmd": "connect", "outputs": targets}},
-                    autostart=False)
-    connected = int((r or {}).get("rt", {}).get("connected", 0))
+# --------------------------------------------------------------- autostart --
 
-    # verify through the graph; fall back to pw-link for anything missing
-    # (jack_connect can fail when the JACK namespace disagrees with PW's)
-    existing = set(pw.links())
-    for c, port in enumerate(playback):
-        link = (f"{rt_node}:out_{c + 1}", f"{sink_name}:{port}")
-        if link in existing:
-            connected = max(connected, c + 1)
-            continue
-        if shutil.which("pw-link"):
-            rc = subprocess.run(["pw-link", link[0], link[1]],
-                                capture_output=True)
-            if rc.returncode == 0:
-                connected += 1
-    out.echo(f"  rt outputs → {sink_name} ({connected} connections)")
+def _systemctl(args: list[str], timeout: float = 60.0) -> tuple[int, str]:
+    """Run `systemctl --user <args>`; returns (rc, combined output).
 
-    # 2) app streams feeding the sink -> rt inputs
-    existing = set(pw.links())
-    sink_inputs = {f"{sink_name}:{p}" for p in playback}
-    rt_inputs = [f"{rt_node}:in_{c + 1}" for c in range(channels)]
-    moved = already = 0
-    for st in pw.list_streams():
-        if st.direction != "playback":
-            continue
-        if st.node_name in (rt_node, sink_name) or not st.node_name:
-            continue
-        linked = [(o, i) for o, i in existing
-                  if o.startswith(f"{st.node_name}:")]
-        if not linked:
-            continue                      # dormant stream, leave it
-        if all(i in rt_inputs for _, i in linked):
-            already += 1
-            continue                      # already through the rt host
-        if not any(i in sink_inputs for _, i in linked):
-            continue                      # lives on another node on purpose
-        for c, port in enumerate(pw.node_ports(st.id, "output")[:channels]):
-            src = f"{st.node_name}:{port}"
-            dst = rt_inputs[c]
-            if (src, dst) in existing:
-                continue
-            for o, i in linked:           # unhook from the sink first
-                if o == src:
-                    subprocess.run(["pw-link", "-d", src, i],
-                                   capture_output=True)
-            rc = subprocess.run(["pw-link", src, dst], capture_output=True)
-            if rc.returncode == 0:
-                moved += 1
+    rc 127 means systemctl is not installed at all, which is reported
+    differently from a unit that exists but failed to start.
+    """
+    exe = shutil.which("systemctl")
+    if not exe:
+        return 127, "systemctl not found"
+    try:
+        r = subprocess.run([exe, "--user", *args], capture_output=True,
+                           text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return 1, f"systemctl {' '.join(args)} timed out"
+    except OSError as e:
+        return 1, f"systemctl failed: {e.strerror or e}"
+    return r.returncode, (r.stdout + r.stderr).strip()
+
+
+# `systemctl is-enabled`/`is-active` answer with one of these words on
+# stdout. Anything else means systemd could not answer at all (no user bus
+# in an ssh session, for instance) and the reply is a multi-line error that
+# must never be squeezed into a status table.
+_ENABLED_WORDS = frozenset({
+    "enabled", "enabled-runtime", "disabled", "static", "masked", "alias",
+    "generated", "indirect", "transient", "bad", "not-found",
+})
+_ACTIVE_WORDS = frozenset({
+    "active", "inactive", "failed", "activating", "deactivating",
+    "reloading", "maintenance", "not-found",
+})
+
+
+def _unit_word(action: str, unit: str, known: frozenset,
+               fallback: str = "unreachable") -> str:
+    """One short word describing a unit, for tables that cannot hold prose."""
+    rc, text = _systemctl([action, unit])
+    if rc == 127:
+        return "n/a"                     # no systemd at all
+    first = (text or "").split("\n")[0].strip()
+    return first if first in known else fallback
+
+
+def _autostart_units() -> dict:
+    from eqforge.system import module_config as mc
+    return mc.autostart_unit_paths(paths.home())
+
+
+def _daemon_argv(auto_wire: bool) -> list[str]:
+    """The daemon command line for the unit - this interpreter, this package."""
+    argv = [sys.executable, "-m", "eqforge", "daemon", "run", "--foreground"]
+    if auto_wire:
+        argv.append("--auto-wire")
+    return argv
+
+
+def _set_auto_wire_config(value: bool) -> None:
+    """Persist auto-wire so a hand-started daemon matches the systemd one."""
+    from eqforge.profiles.store import ProfileStore
+    store = ProfileStore()
+    cfg = store.config()
+    cfg["auto_wire"] = value
+    store.save_config(cfg)
+
+
+def cmd_autostart(args) -> int:
+    """Install or remove the systemd user units that start EQForge at login.
+
+    Two units, because systemd supervises processes better than a Python
+    thread can: it restarts the rt host on crash, logs each one separately
+    under `journalctl --user -u <unit>`, and applies RT scheduling. The
+    daemon then only does what it is good at - profiles, the GUI and
+    keeping the graph wired.
+    """
+    import os
+
+    from eqforge.system import jack, module_config as mc, rthost
+    mode = str(getattr(args, "autostart_action", None) or "status").lower()
+    units = _autostart_units()
+
+    if mode == "status":
+        from eqforge.profiles.store import ProfileStore
+        rows = []
+        for key in ("rt", "daemon"):
+            unit = units[key]
+            if unit.exists():
+                # one short word each: a table column cannot hold the
+                # multi-line error systemd prints when the bus is gone
+                enabled = _unit_word("is-enabled", unit.name, _ENABLED_WORDS)
+                active = _unit_word("is-active", unit.name, _ACTIVE_WORDS)
+                rows.append([unit.name,
+                             out.green("installed"),
+                             enabled,
+                             active])
             else:
-                err = rc.stderr.decode(errors="replace").strip()[:120]
-                out.echo(out.yellow(f"  ! {src} → {dst}: {err or 'failed'}"))
-    out.echo(f"  streams → rt inputs "
-             f"({moved} new, {already} already wired)")
-    if moved == 0 and already == 0:
-        out.echo(out.dim("  note: no app streams were playing into the "
-                         "default sink right now; new streams may need "
-                         "`eqforge system wire` again (or use the SPA "
-                         "filter path for automatic routing)"))
+                rows.append([unit.name, out.dim("absent"), "-", "-"])
+        out.echo(out.table(["unit", "file", "enabled", "active"], rows,
+                           max_widths=[26, 12, 14, 12]))
+        auto_wire = bool(ProfileStore().config().get("auto_wire"))
+        out.echo(f"\n  auto-wire: "
+                 f"{out.green('on') if auto_wire else out.dim('off')}"
+                 f"  {out.dim(f'({paths.config_file()})')}")
+        return 0
+
+    if mode == "on":
+        rt = _resolve_rt_binary(getattr(args, "rt_binary", None))
+        auto = getattr(args, "auto_wire", None)
+        auto_wire = True if auto is None else bool(auto)
+        channels = int(getattr(args, "channels", None) or 2)
+        info = jack.inspect()
+        wrapper = jack.boot_wrapper(info)
+        rt_argv = rthost.launch_argv(rt, paths.rt_socket(),
+                                     paths.active_dsp_file(), channels,
+                                     wrapper=wrapper)
+        # Directory that *contains* the eqforge package, so `-m eqforge`
+        # resolves even for a plain checkout that was never pip-installed.
+        pkg_parent = str(Path(__file__).resolve().parents[2])
+        venv_bin = str(Path(sys.executable).resolve().parent)
+        existing = [p for p in os.environ.get("PATH", "").split(os.pathsep)
+                    if p]
+        # venv first so the daemon resolves the same interpreter/tools the
+        # user gets interactively; de-duplicated, order preserved.
+        path_env = os.pathsep.join(dict.fromkeys([venv_bin, *existing]))
+
+        units["rt"].parent.mkdir(parents=True, exist_ok=True)
+        results = []
+        for key, content in (
+                ("rt", mc.render_rt_unit(rt_argv)),
+                ("daemon", mc.render_daemon_unit(_daemon_argv(auto_wire),
+                                                 pkg_parent, path_env))):
+            status, backup = mc.write_managed(units[key], content)
+            results.append((units[key], status, backup))
+
+        _set_auto_wire_config(auto_wire)
+
+        out.echo(f"  {out.green('✓')} autostart enabled")
+        for path, status, backup in results:
+            if status == "created":
+                out.echo(f"    {out.green('created')}  {path}")
+            elif status == "same":
+                out.echo(f"    {out.dim('unchanged')} {path}")
+            else:
+                out.echo(f"    {out.yellow('updated')}  {path}")
+                if backup is not None:
+                    out.echo(f"      previous version saved as {backup}")
+        out.echo(out.dim(f"    rt host: {' '.join(rt_argv)}"))
+        if wrapper:
+            out.echo(out.dim(
+                f"    ({Path(wrapper[0]).name} makes the host load PipeWire's "
+                "libjack instead of jack2's)"))
+            if info.jackd_running:
+                out.echo(out.yellow(
+                    "    ! a standalone jackd is running right now, but this "
+                    "unit targets PipeWire at login"))
+        else:
+            out.echo(out.dim(
+                "    (no pipewire-jack installed: the host will use the system "
+                "libjack, so a jackd has to be running)"))
+        out.echo(out.dim(f"    auto-wire: {'on' if auto_wire else 'off'} "
+                         f"(persisted in {paths.config_file()})"))
+
+        rc, text = _systemctl(["daemon-reload"])
+        if rc != 0:
+            out.echo(out.yellow(f"  ! systemctl daemon-reload: {text or rc}"))
+        rc, text = _systemctl(["enable", "--now",
+                               units["rt"].name, units["daemon"].name])
+        if rc == 0:
+            out.echo(f"  {out.green('✓')} units enabled and started")
+            return 0
+        if rc == 127:
+            out.echo(out.yellow("  ! systemctl not found - the unit files are "
+                                "written but not enabled"))
+        else:
+            out.echo(out.yellow(f"  ! could not enable the units: "
+                                f"{text or rc}"))
+        out.echo(out.dim("""
+  run these yourself once systemd is reachable:
+    systemctl --user daemon-reload
+    systemctl --user enable --now eqforge-rt.service eqforge-daemon.service
+    journalctl --user -u eqforge-rt -f
+"""))
+        return 1
+
+    if mode == "off":
+        rc, text = _systemctl(["disable", "--now",
+                               units["rt"].name, units["daemon"].name])
+        if rc not in (0, 127):
+            out.echo(out.yellow(f"  ! disable: {text or rc}"))
+        removed = []
+        for key in ("rt", "daemon"):
+            p = units[key]
+            if p.exists():
+                try:
+                    p.unlink()
+                    removed.append(p)
+                except OSError as e:
+                    out.echo(out.yellow(f"  ! could not remove {p}: "
+                                        f"{e.strerror or e}"))
+        _set_auto_wire_config(False)
+        out.echo(f"  {out.green('✓')} autostart disabled")
+        for p in removed:
+            out.echo(f"    removed {p}")
+        out.echo(out.dim("  a daemon or rt host you started by hand is still "
+                         "running: eqforge system stop / eqforge daemon stop"))
+        return 0
+
+    raise EQForgeError(f"unknown autostart action {mode!r}",
+                       hint="on | off | status")
+
 
 
 # ------------------------------------------------------------------ doctor --
@@ -512,6 +694,10 @@ def cmd_doctor(args) -> int:
           lambda: (client.daemon_running(),
                    "running" if client.daemon_running() else "not running"),
           fix="eqforge daemon start")
+    check("rt host binary", _rt_binary_check,
+          fix="make -C rthost && make -C rthost install")
+    check("jack transport", _jack_check,
+          fix=_jack_fix_hint())
     check("rt host",
           lambda: (_rt_ok(client), _rt_ok_detail(client)),
           fix="eqforge system start")
@@ -525,7 +711,11 @@ def cmd_doctor(args) -> int:
         out.echo(f"  {color(status.ljust(4))}  {name.ljust(22)} {out.dim(detail)}")
     out.echo()
     if ok:
-        out.echo(out.green("  EQForge is healthy ✓"))
+        warns = sum(1 for r in results if r[1] == "WARN")
+        out.echo(out.green("  EQForge is healthy ✓") +
+                 (out.dim(f"  ({warns} warning"
+                          f"{'s' if warns != 1 else ''} above)")
+                  if warns else ""))
     else:
         out.echo(out.red("  some checks failed - see hints above"))
     return 0 if ok else 1
@@ -546,6 +736,32 @@ def _deps_detail() -> str:
         return f"numpy {md.version('numpy')}, scipy {md.version('scipy')}"
     except md.PackageNotFoundError:
         return "numpy/scipy present (unversioned install)"
+
+
+def _rt_binary_check() -> tuple[bool, str]:
+    """Does a usable eqforge-rt exist at all? (precondition for `system start`)"""
+    rt = _rt_binary()
+    if rt is None:
+        return False, "eqforge-rt not found - `system start` cannot work"
+    return True, str(rt)
+
+
+def _jack_fix_hint() -> str:
+    from eqforge.system import jack
+    return jack.PIPEWIRE_JACK_SHORT
+
+
+def _jack_check() -> tuple[bool, str]:
+    """Is a JACK-compatible server reachable, with only one JACK stack installed?
+
+    The rt host is a JACK client, and the jack2-vs-pipewire-jack conflict is
+    the most common reason it dies at startup reporting
+    "cannot open JACK client (17)". Nothing else in `doctor` looked at that
+    layer, so the failure surfaced only as a log file to go and read.
+    """
+    from eqforge.system import jack
+    info = jack.inspect()
+    return info.usable and not info.conflict, info.detail
 
 
 def _rt_ok(client) -> bool:

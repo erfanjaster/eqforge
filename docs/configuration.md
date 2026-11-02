@@ -34,6 +34,8 @@ Environment overrides: `EQFORGE_LIB` (path to libeqforge.so), `EQFORGE_RT`
       "match": { "bluez_address": "AA:BB:CC:DD:EE:FF" },
       "priority": 20 }
   ],
+  "auto_wire": false,
+
   "gui": { "port": 0, "open_browser": true },
   "notifications": true
 }
@@ -46,6 +48,7 @@ Environment overrides: `EQFORGE_LIB` (path to libeqforge.so), `EQFORGE_RT`
 | `bypass` | `false` | engine bypass state |
 | `auto_switch` | `false` | allow device-rule profile switching |
 | `rules` | `[]` | global matching rules (merged with per-profile rules) |
+| `auto_wire` | `false` | let the daemon re-link application streams through the rt host automatically. `eqforge system autostart on` sets it; `--auto-wire` / `--no-auto-wire` on the daemon command line override it; the `set_auto_wire` RPC updates and persists it. Off by default because the daemon is spawned implicitly by ordinary commands and must not rewire the graph unasked |
 | `gui.port` | `0` | fixed GUI port (0 = ephemeral) |
 | `notifications` | `true` | desktop notifications on switches/warnings |
 
@@ -76,12 +79,15 @@ echo '{"method":"status"}' | socat - UNIX-CONNECT:$XDG_RUNTIME_DIR/eqforge/daemo
 | `apply_rules_now` | — | `{switched, profile?}` |
 | `analyze_file` | `{path, profile?}` | report + advice |
 | `rt_command` | `{cmd}` | RT host reply |
+| `wire` | — | one wiring pass, same code path as `eqforge system wire`: `{sink, rt_node, outputs, outputs_new, streams_moved, already_wired, skipped, errors, notes, changed}` |
+| `set_auto_wire` | `{value}` | `{auto_wire}` — persisted to `config.json` |
 
 Errors return `{"ok": false, "error": "...", "hint": "..."}` with a stable
 exit-code-compatible `code`. The same methods are available over HTTP:
 `GET /api/<method>` (no params) and `POST /api/<method>` (JSON body);
 `GET /api/events` is the SSE stream (`meters`, `profile_changed`,
-`graph_changed`, `profiles_changed`).
+`graph_changed`, `profiles_changed`, `device_changed`, `graph_wired`,
+`rt_started`, `rt_synced`, `rt_error`, `auto_wire`).
 
 ## Logging
 

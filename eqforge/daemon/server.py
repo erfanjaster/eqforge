@@ -4,7 +4,15 @@ Single process, three threads:
   - RPC loop on $XDG_RUNTIME_DIR/eqforge/daemon.sock (line-delimited JSON)
   - HTTP server on 127.0.0.1 (GUI assets, /api/* REST, /api/events SSE)
   - device watcher: polls the PipeWire graph (~2 s) and applies matching
-    rules when auto-switch is enabled; emits SSE events on changes.
+    rules when auto-switch is enabled; emits SSE events on changes. With
+    `auto_wire` it also re-links any stream that stopped passing through
+    the rt host, and with `manage_rt` it keeps that host alive.
+
+Why the watcher owns re-wiring: PipeWire destroys a stream node when a
+player stops and creates a fresh one when it starts, which WirePlumber
+links straight to the default sink. The rt-host deployment therefore loses
+each stream the moment it restarts, and audio quietly stops being processed
+until someone runs `eqforge system wire` again.
 
 The HTTP server is stdlib-only (no framework) to keep the runtime footprint
 small and the dependency surface zero.
@@ -63,13 +71,52 @@ class EventBus:
 
 
 class Daemon:
-    def __init__(self):
+    # Class-level defaults, so a Daemon built without __init__ (the existing
+    # test fixture uses Daemon.__new__ and assigns only what it needs) still
+    # has a coherent configuration instead of raising AttributeError.
+    auto_wire = False
+    manage_rt = False
+    rt_channels = 2
+    tick = 2.0
+    rt_retry = 15.0
+    _rt_proc = None
+    _rt_last_try = 0.0
+    _rt_stop_requested = False
+    _wire_sig: str | None = None
+    _wire_ok = False
+
+    def __init__(self, auto_wire: bool | None = None, manage_rt: bool = False,
+                 rt_channels: int = 2, tick: float = 2.0,
+                 rt_retry: float = 15.0):
         self.state = EngineState()
         self.bus = EventBus()
         self.stop_event = threading.Event()
         self.started = time.time()
+        self.tick = float(tick)
+        self.rt_retry = float(rt_retry)
+        self.manage_rt = bool(manage_rt)
+        self.rt_channels = int(rt_channels or 2)
+        self._rt_proc = None
+        self._rt_last_try = 0.0
+        self._rt_stop_requested = False
+        self._wire_sig: str | None = None
+        self._wire_ok = False
+        # `auto_wire=None` means "whatever config.json says", so a daemon
+        # started by hand behaves like the one systemd starts. It is off
+        # unless asked for: the daemon is spawned implicitly by ordinary
+        # commands (`eqforge status`), and silently rewiring the user's audio
+        # graph from there would be a nasty surprise.
+        if auto_wire is None:
+            try:
+                auto_wire = bool(self.state.store.config().get("auto_wire"))
+            except Exception:                       # noqa: BLE001
+                auto_wire = False
+        self.auto_wire = bool(auto_wire)
         self.state.ensure_active_config()
         self.state.sync_rt()          # best effort; watcher retries
+        if self.auto_wire or self.manage_rt:
+            log.info("daemon: auto_wire=%s manage_rt=%s",
+                     self.auto_wire, self.manage_rt)
 
     # ---------------- RPC dispatch ----------------
     @staticmethod
@@ -106,7 +153,12 @@ class Daemon:
             return {"ok": True, "stopping": True}
 
         if method == "status":
-            return st.status()
+            s = st.status()
+            # Daemon-level supervision flags belong to the daemon, not to
+            # EngineState, so they are added here.
+            s["auto_wire"] = self.auto_wire
+            s["manage_rt"] = self.manage_rt
+            return s
 
         if method == "set_profile":
             slot = params.get("slot")
@@ -182,8 +234,44 @@ class Daemon:
             return self._analyze_file(params)
 
         if method == "rt_command":
-            r = st._tell_rt(params.get("cmd") or {})
+            cmd = params.get("cmd") or {}
+            r = st._tell_rt(cmd)
+            if isinstance(cmd, dict) and cmd.get("cmd") == "quit":
+                # `eqforge system stop` relays its quit through here. A
+                # supervisor that resurrects a host the user just asked to
+                # stop is fighting them, so remember the intent - it is
+                # dropped again as soon as a host is running.
+                self._rt_stop_requested = True
+                self._rt_proc = None
             return {"rt": r}
+
+        if method == "wire":
+            # Manual equivalent of `eqforge system wire`, for the GUI and
+            # for scripts that talk to the daemon instead of the CLI.
+            from eqforge.system import wiring
+            report = wiring.wire_graph(st._tell_rt)
+            self._wire_sig = None      # next tick re-checks from scratch
+            return {"sink": report.sink, "rt_node": report.rt_node,
+                    "outputs": report.outputs_ok,
+                    "outputs_new": report.outputs_new,
+                    "streams_moved": report.streams_moved,
+                    "already_wired": report.already_wired,
+                    "skipped": report.skipped,
+                    "errors": report.errors, "notes": report.notes,
+                    "changed": report.changed}
+
+        if method == "set_auto_wire":
+            if "value" not in params:
+                raise EQForgeError("missing required parameter 'value'")
+            value = bool(params["value"])
+            self.auto_wire = value
+            self._wire_sig = None
+            cfg = st.store.config()
+            cfg["auto_wire"] = value
+            st.store.save_config(cfg)      # survives a daemon restart
+            log.info("auto-wire %s", "enabled" if value else "disabled")
+            self.bus.publish("auto_wire", {"enabled": value})
+            return {"auto_wire": value}
 
         raise EQForgeError(f"unknown RPC method {method!r}")
 
@@ -255,6 +343,8 @@ class Daemon:
         last = None
         while not self.stop_event.is_set():
             try:
+                if self.manage_rt:
+                    self._ensure_rt_host()
                 # the rt host only reconfigures on command: if it started
                 # before the daemon published active-dsp.json it is still
                 # unconfigured, so push the current config once.
@@ -263,20 +353,95 @@ class Daemon:
                         log.info("rt host synced with %s",
                                  paths.active_dsp_file())
                         self.bus.publish("rt_synced", {})
-                snap = pw.graph_snapshot() if pw.pipewire_available() else None
-                if snap is not None:
-                    key = json.dumps(
-                        [d["name"] for d in snap["devices"]] +
-                        [snap["default_sink"] or ""], sort_keys=True)
+                # One pw-dump per tick, shared by device matching and the
+                # wiring check: each query used to shell out separately, so
+                # a tick cost three dumps before auto-wire added more.
+                view = pw.snapshot() if pw.pipewire_available() else None
+                if view is not None:
+                    devices = view.devices()
+                    sink = view.default_sink()
+                    key = json.dumps([d.name for d in devices] + [sink or ""],
+                                     sort_keys=True)
                     if key != last:
                         last = key
                         self.bus.publish("graph_changed",
-                                         {"devices": len(snap["devices"]),
-                                          "default_sink": snap["default_sink"]})
+                                         {"devices": len(devices),
+                                          "default_sink": sink})
                         self._apply_rules(reason="graph")
+                    if self.auto_wire:
+                        self._auto_wire(view)
             except Exception:  # noqa: BLE001 - watcher must never die
                 log.debug("watcher error:\n%s", traceback.format_exc())
-            self.stop_event.wait(2.0)
+            self.stop_event.wait(self.tick)
+
+    # ---------------- rt host supervision (optional) ----------------
+    def _ensure_rt_host(self) -> None:
+        """Keep the rt host alive when this daemon was told to manage it.
+
+        systemd does this better when the units are installed (restart
+        policy, journald logs, RT scheduling), so `autostart on` leaves
+        management to systemd and this stays off. It exists for the
+        by-hand case: `eqforge daemon run --manage-rt`.
+
+        "Alive" means *crash*-free, not "always on": a quit relayed through
+        `rt_command` (`eqforge system stop`) is deliberate, so it is not
+        undone. Supervision resumes the moment a host is running again.
+        """
+        from eqforge.system import rthost
+        if self._rt_proc is not None and self._rt_proc.poll() is None:
+            return                       # still ours, still alive
+        if rthost.is_running():
+            self._rt_proc = None         # started elsewhere; leave it alone
+            self._rt_stop_requested = False   # ...and it is back: supervise it
+            return
+        if self._rt_stop_requested:
+            return                       # stopped on purpose, not crashed
+        now = time.time()
+        if now - self._rt_last_try < self.rt_retry:
+            return                       # back off instead of spinning
+        self._rt_last_try = now
+        try:
+            launched = rthost.start(channels=self.rt_channels, wait=3.0)
+        except EQForgeError as e:
+            log.warning("cannot start rt host: %s%s", e.message,
+                        f" ({e.hint})" if e.hint else "")
+            self.bus.publish("rt_error",
+                             {"error": e.message, "hint": e.hint or ""})
+            return
+        self._rt_proc = launched.proc
+        self._rt_stop_requested = False  # we are supervising it again
+        self._wire_sig = None            # a new host has no links at all
+        log.info("started rt host pid %d (%s)", launched.pid, launched.rt)
+        self.bus.publish("rt_started", {"pid": launched.pid,
+                                        "wrapper": launched.wrapper})
+
+    # ---------------- automatic re-wiring ----------------
+    def _auto_wire(self, view) -> None:
+        """Re-link streams that stopped passing through the rt host.
+
+        Cheap in the common case: the graph signature is compared first, so
+        a tick where nothing changed costs no `pw-link` calls at all.
+        """
+        from eqforge.system import wiring
+        sig = wiring.stream_signature(view)
+        if sig is None:
+            return                       # PipeWire went away
+        if sig == self._wire_sig and self._wire_ok:
+            return                       # unchanged since a successful pass
+        report = wiring.wire_graph(self.state._tell_rt, graph=view)
+        self._wire_ok = report.rt_node is not None and not report.errors
+        # Only trust the signature after a pass that could actually do its
+        # work; otherwise (host down, sink missing) retry on the next tick.
+        self._wire_sig = sig if self._wire_ok else None
+        if report.errors:
+            log.warning("auto-wire: %s", "; ".join(report.errors[:3]))
+        if report.changed:
+            log.info("auto-wire: %s", report.summary())
+            self.bus.publish("graph_wired",
+                             {"sink": report.sink,
+                              "streams_moved": report.streams_moved,
+                              "already_wired": report.already_wired,
+                              "outputs": report.outputs_ok})
 
     # ---------------- servers ----------------
     def _socket_alive(self, sock_path: Path) -> bool:
@@ -358,6 +523,12 @@ class Daemon:
 
     def stop(self) -> None:
         self.stop_event.set()
+        # Only tear down an rt host this daemon launched; one owned by
+        # systemd (or started by hand) must survive the daemon.
+        if self._rt_proc is not None:
+            from eqforge.system import rthost
+            rthost.stop(self._rt_proc)
+            self._rt_proc = None
         httpd = getattr(self, "_httpd", None)
         if httpd:
             threading.Thread(target=httpd.shutdown, daemon=True).start()

@@ -8,7 +8,7 @@
  * docs/profile-format.md). Configuration may happen from a non-audio thread;
  * audio-visible state changes are applied with a short fade to avoid clicks.
  *
- * SPDX-License-Identifier: MIT
+ * SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-EQForge-Commercial
  */
 #ifndef EQFORGE_CHAIN_H
 #define EQFORGE_CHAIN_H

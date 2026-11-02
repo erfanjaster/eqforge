@@ -5,7 +5,7 @@
  * "momentary" definition). Full gated LUFS/LRA measurement lives in the
  * analysis layer (offline); this meter is for live UI readouts.
  *
- * SPDX-License-Identifier: MIT
+ * SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-EQForge-Commercial
  */
 #ifndef EQFORGE_METER_H
 #define EQFORGE_METER_H

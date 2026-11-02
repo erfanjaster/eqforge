@@ -1,6 +1,6 @@
 /* EQForge native core - multi-band parametric EQ implementation.
  *
- * SPDX-License-Identifier: MIT
+ * SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-EQForge-Commercial
  */
 #include "eqforge/eq.h"
 

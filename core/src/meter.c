@@ -4,7 +4,7 @@
  * sample rate works). Momentary loudness uses a 400 ms sliding window of
  * per-sample channel-weighted mean-square values.
  *
- * SPDX-License-Identifier: MIT
+ * SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-EQForge-Commercial
  */
 #include "eqforge/meter.h"
 

@@ -7,7 +7,9 @@ name = "eqforge"
 version = "1.0.0"
 description = "EQForge - profile-driven smart audio processing for Linux (native C DSP core + PipeWire integration)"
 readme = "README.md"
-license = { text = "MIT" }
+# Dual-licensed: GPLv3 for everyone, plus a commercial license for
+# proprietary integration. See LICENSE and LICENSE.COMMERCIAL.md.
+license = { text = "GPL-3.0-only" }
 requires-python = ">=3.10"
 authors = [{ name = "EQForge contributors" }]
 keywords = ["audio", "equalizer", "pipewire", "dsp", "linux", "lufs"]
@@ -15,7 +17,7 @@ classifiers = [
     "Development Status :: 4 - Beta",
     "Environment :: Console",
     "Intended Audience :: End Users/Desktop",
-    "License :: OSI Approved :: MIT License",
+    "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
     "Operating System :: POSIX :: Linux",
     "Programming Language :: Python :: 3",
     "Programming Language :: C",
@@ -34,7 +36,9 @@ dev = ["pytest>=7", "pytest-cov"]
 eqforge = "eqforge.cli.main:main"
 
 [project.urls]
-Homepage = "https://github.com/eqforge/eqforge"
+Homepage = "https://github.com/erfanjaster/eqforge"
+Repository = "https://github.com/erfanjaster/eqforge"
+Issues = "https://github.com/erfanjaster/eqforge/issues"
 
 [tool.setuptools.packages.find]
 include = ["eqforge*"]

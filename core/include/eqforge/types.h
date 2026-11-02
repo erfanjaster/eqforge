@@ -1,6 +1,6 @@
 /* EQForge native core - shared types.
  *
- * SPDX-License-Identifier: MIT
+ * SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-EQForge-Commercial
  */
 #ifndef EQFORGE_TYPES_H
 #define EQFORGE_TYPES_H

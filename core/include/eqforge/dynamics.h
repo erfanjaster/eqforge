@@ -10,7 +10,7 @@
  *
  * Both are RT-safe: no allocation or syscalls inside process().
  *
- * SPDX-License-Identifier: MIT
+ * SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-EQForge-Commercial
  */
 #ifndef EQFORGE_DYNAMICS_H
 #define EQFORGE_DYNAMICS_H

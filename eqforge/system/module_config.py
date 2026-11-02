@@ -16,6 +16,7 @@ produces their content so it is reviewable before touching the system.
 """
 from __future__ import annotations
 
+import shlex
 import shutil
 import textwrap
 import time
@@ -96,7 +97,7 @@ def render_systemd_unit(exec_path: str, socket_path: str,
                                 "config": config_path}
 
 
-def _write_managed(path: Path, content: str) -> tuple[str, Path | None]:
+def write_managed(path: Path, content: str) -> tuple[str, Path | None]:
     """Write `content` to a path eqforge owns on behalf of the user.
 
     Returns (status, backup_path) where status is one of:
@@ -132,14 +133,14 @@ def write_system_setup(paths_mod, exec_path: Path | None = None,
                        results: list | None = None) -> list[Path]:
     """Write conf + unit into XDG dirs; returns written files.
 
-    Existing files are backed up before being replaced (see _write_managed).
+    Existing files are backed up before being replaced (see write_managed).
     Pass `results` to receive (path, status, backup) tuples.
     """
     written = []
     pw_dir = Path(paths_mod.home()) / ".config/pipewire/pipewire.conf.d"
     pw_dir.mkdir(parents=True, exist_ok=True)
     conf = pw_dir / "99-eqforge.conf"
-    status, backup = _write_managed(
+    status, backup = write_managed(
         conf, render_pipewire_conf(str(paths_mod.active_dsp_file())))
     written.append(conf)
     if results is not None:
@@ -149,10 +150,96 @@ def write_system_setup(paths_mod, exec_path: Path | None = None,
     unit_dir.mkdir(parents=True, exist_ok=True)
     unit = unit_dir / "eqforge-rt.service"
     exec_path = exec_path or Path("/usr/libexec/eqforge/eqforge-rt")
-    status, backup = _write_managed(
+    status, backup = write_managed(
         unit, render_systemd_unit(str(exec_path), str(paths_mod.rt_socket()),
                                   str(paths_mod.active_dsp_file())))
     written.append(unit)
     if results is not None:
         results.append((unit, status, backup))
     return written
+
+
+# --------------------------------------------------------------------------
+# systemd user units for `eqforge system autostart on`
+#
+# Generated per install, not shipped as static files: the rt host may live in
+# a checkout (rthost/build/eqforge-rt) or in /usr/libexec, the daemon may run
+# from a venv or from site-packages, and under pipewire-jack the host needs a
+# `pw-jack` prefix. A static template cannot know any of that, which is why
+# packaging/systemd/*.service only fits a packaged install.
+# --------------------------------------------------------------------------
+
+RT_UNIT = """\
+[Unit]
+Description=EQForge real-time audio host (JACK/PipeWire client)
+Documentation=https://github.com/erfanjaster/eqforge
+# The host is a JACK client: without the sound server up, jack_client_open()
+# fails and systemd would just restart it in a loop.
+After=pipewire.service pipewire.socket
+Wants=pipewire.service
+
+[Service]
+Type=simple
+ExecStart=%(exec)s
+Restart=on-failure
+RestartSec=2
+# RT scheduling headroom; PipeWire sessions with rtkit grant this anyway.
+Nice=-11
+# %%t is systemd's per-user runtime directory (== $XDG_RUNTIME_DIR in a
+# session). Pinning it keeps the control socket where the daemon and the CLI
+# look for it even when the unit is started outside a normal session.
+Environment=XDG_RUNTIME_DIR=%%t
+
+[Install]
+WantedBy=default.target
+"""
+
+DAEMON_UNIT = """\
+[Unit]
+Description=EQForge control daemon (profiles, GUI, automatic rewiring)
+Documentation=https://github.com/erfanjaster/eqforge
+# Starts after the rt host so the first wiring pass has something to wire to.
+After=pipewire.service wireplumber.service eqforge-rt.service
+Wants=pipewire.service eqforge-rt.service
+
+[Service]
+Type=simple
+ExecStart=%(exec)s
+Environment=PYTHONPATH=%(pythonpath)s
+Environment=PATH=%(path)s
+Environment=XDG_RUNTIME_DIR=%%t
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target
+"""
+
+
+def _argv_line(argv: list[str]) -> str:
+    """An ExecStart= value: absolute, quoted, no shell involved."""
+    return " ".join(shlex.quote(str(a)) for a in argv)
+
+
+def render_rt_unit(exec_argv: list[str]) -> str:
+    """Unit for the native rt host.
+
+    `exec_argv` must come from `rthost.launch_argv()` so that the pw-jack
+    wrapper, socket path and config path are the same ones the CLI uses.
+    """
+    return RT_UNIT % {"exec": _argv_line(exec_argv)}
+
+
+def render_daemon_unit(exec_argv: list[str], pythonpath: str = "",
+                       path: str = "") -> str:
+    """Unit for the Python daemon (GUI, profiles, auto-wire)."""
+    return DAEMON_UNIT % {"exec": _argv_line(exec_argv),
+                          "pythonpath": pythonpath or "",
+                          "path": path or "/usr/local/bin:/usr/bin:/bin"}
+
+
+def autostart_unit_paths(home: Path | str) -> dict[str, Path]:
+    """Where the generated user units live."""
+    d = Path(home) / ".config/systemd/user"
+    return {"rt": d / "eqforge-rt.service",
+            "daemon": d / "eqforge-daemon.service"}

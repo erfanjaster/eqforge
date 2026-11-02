@@ -8,7 +8,7 @@
  *
  * Only the operations the core actually needs are provided.
  *
- * SPDX-License-Identifier: MIT
+ * SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-EQForge-Commercial
  */
 #ifndef EQFORGE_ATOMICS_H
 #define EQFORGE_ATOMICS_H

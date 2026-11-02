@@ -4,7 +4,7 @@
  * numbers, booleans, null). Parsing is single-pass into a preallocated
  * arena, so it is deterministic and suitable for control-thread use.
  *
- * SPDX-License-Identifier: MIT
+ * SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-EQForge-Commercial
  */
 #ifndef EQFORGE_JSON_H
 #define EQFORGE_JSON_H

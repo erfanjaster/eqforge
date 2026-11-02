@@ -110,7 +110,12 @@ def list_devices(direction: str | None = None) -> list[Device]:
     """Audio sink/source nodes currently in the graph."""
     if not pipewire_available():
         return []
-    dump = json.loads(_run(["pw-dump"]))
+    return _devices_from(_dump(), direction)
+
+
+def _devices_from(dump: list[dict],
+                  direction: str | None = None) -> list[Device]:
+    """Parse sink/source nodes out of an already-fetched dump."""
     devices: list[Device] = []
     for obj in dump:
         info = obj.get("info", {})
@@ -141,7 +146,11 @@ def list_streams() -> list[Stream]:
     """Application audio streams currently in the graph."""
     if not pipewire_available():
         return []
-    dump = json.loads(_run(["pw-dump"]))
+    return _streams_from(_dump())
+
+
+def _streams_from(dump: list[dict]) -> list[Stream]:
+    """Parse application stream nodes out of an already-fetched dump."""
     streams: list[Stream] = []
     for obj in dump:
         info = obj.get("info", {})
@@ -273,6 +282,11 @@ def default_sink() -> str | None:
         dump = _dump()
     except SystemError:
         return None
+    return _default_sink_from(dump)
+
+
+def _default_sink_from(dump: list[dict]) -> str | None:
+    """Resolve the default sink from an already-fetched dump."""
     nodes = _node_names(dump)
     stores = _metadata_stores(dump)
     for store in ("default", "settings"):
@@ -332,9 +346,11 @@ def link_info() -> dict:
 _PORT_POS = ("FL", "FR", "FC", "LFE", "RL", "RR", "SL", "SR", "AUX")
 
 
-def _ports_of(node_id: int, direction: str | None) -> list[tuple[str, str]]:
+def _ports_of(node_id: int, direction: str | None,
+              dump: list[dict] | None = None) -> list[tuple[str, str]]:
     """[(port.name, port.alias-or-empty)] of a node, in channel order."""
-    dump = _dump()
+    if dump is None:
+        dump = _dump()
     found: list[tuple[int, str, str]] = []
     for obj in dump:
         if not str(obj.get("type", "")).endswith("Port"):
@@ -362,17 +378,21 @@ def _ports_of(node_id: int, direction: str | None) -> list[tuple[str, str]]:
     return [(n, a) for _, n, a in found]
 
 
-def node_ports(node_id: int, direction: str | None = None) -> list[str]:
+def node_ports(node_id: int, direction: str | None = None,
+               dump: list[dict] | None = None) -> list[str]:
     """Port names of a node, in channel order (FL, FR, ...).
 
     direction: "input" | "output" | None (both). Names are bare port names
     (e.g. "playback_FL"); prefix with the node name for pw-link.
+    Pass `dump` to answer from an existing snapshot instead of a new
+    `pw-dump` subprocess.
     """
-    return [n for n, _ in _ports_of(node_id, direction)]
+    return [n for n, _ in _ports_of(node_id, direction, dump)]
 
 
 def node_port_targets(node_id: int, direction: str | None = None,
-                      node_name: str = "") -> list[str]:
+                      node_name: str = "",
+                      dump: list[dict] | None = None) -> list[str]:
     """Fully qualified port names usable with jack_connect()/pw-link.
 
     pipewire-jack exposes non-JACK ports under their `port.alias`
@@ -381,15 +401,16 @@ def node_port_targets(node_id: int, direction: str | None = None,
     alias when present, fall back to node.name:port.name.
     """
     targets = []
-    for name, alias in _ports_of(node_id, direction):
+    for name, alias in _ports_of(node_id, direction, dump):
         targets.append(alias if alias else
                        (f"{node_name}:{name}" if node_name else name))
     return targets
 
 
-def links() -> list[tuple[str, str]]:
+def links(dump: list[dict] | None = None) -> list[tuple[str, str]]:
     """All graph links as ("out_node:out_port", "in_node:in_port")."""
-    dump = _dump()
+    if dump is None:
+        dump = _dump()
     nodes = _node_names(dump)
     ports: dict[int, str] = {}
     for obj in dump:
@@ -415,3 +436,58 @@ def links() -> list[tuple[str, str]]:
         if op and ip:
             out.append((op, ip))
     return out
+
+
+class GraphView:
+    """One `pw-dump`, many answers.
+
+    Every query in this module used to shell out separately, so a single
+    wiring pass cost 5+N `pw-dump` subprocesses (N = streams) - far too
+    heavy to poll every couple of seconds, which is exactly what automatic
+    re-wiring needs. A dump already contains the nodes, ports, links *and*
+    metadata, so one snapshot answers all of them - and consistently: no
+    torn reads where a stream existed for `list_streams()` but was gone by
+    the time `links()` ran.
+    """
+
+    def __init__(self, dump: list[dict] | None = None):
+        self._dump = dump if dump is not None else _dump()
+        self._nodes = _node_names(self._dump)
+
+    @property
+    def raw(self) -> list[dict]:
+        return self._dump
+
+    def devices(self, direction: str | None = None) -> list[Device]:
+        return _devices_from(self._dump, direction)
+
+    def streams(self) -> list[Stream]:
+        return _streams_from(self._dump)
+
+    def default_sink(self) -> str | None:
+        return _default_sink_from(self._dump)
+
+    def links(self) -> list[tuple[str, str]]:
+        return links(self._dump)
+
+    def node_ports(self, node_id: int,
+                   direction: str | None = None) -> list[str]:
+        return node_ports(node_id, direction, self._dump)
+
+    def node_port_targets(self, node_id: int, direction: str | None = None,
+                          node_name: str = "") -> list[str]:
+        return node_port_targets(node_id, direction, node_name, self._dump)
+
+    def node_id(self, node_name: str) -> int | None:
+        for nid, name in self._nodes.items():
+            if name == node_name:
+                return nid
+        return None
+
+    def node_names(self) -> dict[int, str]:
+        return dict(self._nodes)
+
+
+def snapshot() -> GraphView:
+    """A fresh GraphView (one `pw-dump`)."""
+    return GraphView()

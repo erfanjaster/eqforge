@@ -10,7 +10,9 @@ Usage overview (see docs/cli.md for the full manual):
   eqforge import FILE [--id ID] | export P DEST | diff A B | validate P
   eqforge devices | streams | status
   eqforge set-profile P [--slot A|B] | bypass on|off|toggle | ab [A|B|toggle]
-  eqforge daemon start|stop|status|run | gui | system setup|start|stop|status
+  eqforge daemon start|stop|restart|status|run [--auto-wire] [--manage-rt]
+  eqforge gui
+  eqforge system setup|start|stop|status|wire|autostart on|off|status
   eqforge doctor [--build-core] | synth SIG OUT | version
 """
 from __future__ import annotations
@@ -183,6 +185,15 @@ def build_parser() -> argparse.ArgumentParser:
                     help=argparse.SUPPRESS)
     sp.add_argument("--no-http", action="store_true")
     sp.add_argument("--port", type=int)
+    # tri-state: absent -> whatever config.json says (see Daemon.__init__)
+    sp.add_argument("--auto-wire", dest="auto_wire", action="store_true",
+                    default=None,
+                    help="keep re-linking streams through the rt host")
+    sp.add_argument("--no-auto-wire", dest="auto_wire", action="store_false",
+                    help="never touch the PipeWire graph automatically")
+    sp.add_argument("--manage-rt", action="store_true",
+                    help="also start and supervise the rt host")
+    sp.add_argument("--channels", type=int, help="channels for the rt host")
     sp.set_defaults(fn=cs.cmd_daemon)
 
     sp = add_parser("gui", help="open the graphical interface")
@@ -194,11 +205,21 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = add_parser("system", help="system-wide processing (rt host)")
     sp.add_argument("action", choices=("setup", "start", "stop", "status",
-                                       "wire"))
+                                       "wire", "autostart"))
+    sp.add_argument("autostart_action", nargs="?",
+                    choices=("on", "off", "status"), default="status",
+                    help="for `system autostart`")
     sp.add_argument("--rt-binary", help="path to eqforge-rt")
     sp.add_argument("--channels", type=int)
     sp.add_argument("--manage", action="store_true",
                     help="also wire rt outputs to the default sink")
+    sp.add_argument("--auto-wire", dest="auto_wire", action="store_true",
+                    default=None,
+                    help="with `autostart on`: keep streams routed through "
+                         "the rt host automatically (default)")
+    sp.add_argument("--no-auto-wire", dest="auto_wire", action="store_false",
+                    help="with `autostart on`: install units but never touch "
+                         "the graph automatically")
     sp.set_defaults(fn=cs.cmd_system)
 
     sp = add_parser("doctor", help="diagnose the installation")

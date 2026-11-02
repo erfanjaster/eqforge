@@ -21,7 +21,7 @@
  *
  * Build: make -C rthost
  *
- * SPDX-License-Identifier: MIT
+ * SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-EQForge-Commercial
  */
 #define _GNU_SOURCE
 

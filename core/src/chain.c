@@ -15,7 +15,7 @@
  *   "post_gain_db": 0.0
  * }
  *
- * SPDX-License-Identifier: MIT
+ * SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-EQForge-Commercial
  */
 #include "eqforge/chain.h"
 #include "eqforge/eqforge.h"

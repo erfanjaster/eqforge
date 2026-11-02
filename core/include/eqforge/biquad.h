@@ -8,7 +8,7 @@
  * and the processor ramps the live coefficients toward them, eliminating
  * zipper noise for real-time parameter automation.
  *
- * SPDX-License-Identifier: MIT
+ * SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-EQForge-Commercial
  */
 #ifndef EQFORGE_BIQUAD_H
 #define EQFORGE_BIQUAD_H

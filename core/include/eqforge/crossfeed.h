@@ -14,7 +14,7 @@
  * response and, with the previous non-normalised summing, produced a +3.5 dB
  * bass boost instead of a smooth crossfeed.
  *
- * SPDX-License-Identifier: MIT
+ * SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-EQForge-Commercial
  */
 #ifndef EQFORGE_CROSSFEED_H
 #define EQFORGE_CROSSFEED_H

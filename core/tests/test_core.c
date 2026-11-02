@@ -11,7 +11,7 @@
  *  - meter LUFS of a known 1 kHz sine (~ -23.0 LUFS at -20 dBFS RMS)
  *  - chain end-to-end: JSON config, processing, latency, snapshot
  *
- * SPDX-License-Identifier: MIT
+ * SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-EQForge-Commercial
  */
 #include <assert.h>
 #include <math.h>

@@ -4,7 +4,7 @@
  * every channel bank with independent state, so the common stereo case has
  * identical coefficients but per-channel processing.
  *
- * SPDX-License-Identifier: MIT
+ * SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-EQForge-Commercial
  */
 #ifndef EQFORGE_EQ_H
 #define EQFORGE_EQ_H

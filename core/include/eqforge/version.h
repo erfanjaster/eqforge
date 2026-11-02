@@ -1,6 +1,6 @@
 /* EQForge native core - version and ABI information.
  *
- * SPDX-License-Identifier: MIT
+ * SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-EQForge-Commercial
  */
 #ifndef EQFORGE_VERSION_H
 #define EQFORGE_VERSION_H

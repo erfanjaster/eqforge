@@ -11,7 +11,7 @@
  *   7. rewrite the config file and verify the node hot-reloads it
  *      (the watcher thread must stage a new chain without touching process())
  *
- * SPDX-License-Identifier: MIT
+ * SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-EQForge-Commercial
  */
 #define _GNU_SOURCE
 #include <dlfcn.h>

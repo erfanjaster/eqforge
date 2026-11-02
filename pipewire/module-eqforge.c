@@ -18,7 +18,7 @@
  * reconfigure at ~1 Hz on the data thread (documented trade-off; a future
  * revision can move reload to a main-thread timer via SPA loop).
  *
- * SPDX-License-Identifier: MIT
+ * SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-EQForge-Commercial
  */
 
 #ifndef _POSIX_C_SOURCE

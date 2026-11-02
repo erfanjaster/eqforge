@@ -3,7 +3,7 @@
  * Direct-form convolution over a per-channel history ring. O(taps) per
  * sample; suitable for headphone-correction IRs up to a few thousand taps.
  *
- * SPDX-License-Identifier: MIT
+ * SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-EQForge-Commercial
  */
 #include "eqforge/fir.h"
 

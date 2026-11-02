@@ -5,7 +5,7 @@
  * taps). Latency is zero; CPU cost is O(taps). A future C++ port can swap in
  * a partitioned FFT convolver behind the same interface.
  *
- * SPDX-License-Identifier: MIT
+ * SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-EQForge-Commercial
  */
 #ifndef EQFORGE_FIR_H
 #define EQFORGE_FIR_H

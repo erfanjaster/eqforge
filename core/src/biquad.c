@@ -3,7 +3,7 @@
  * Filter design: Robert Bristow-Johnson's Audio EQ Cookbook formulas.
  * Processing: Direct Form II Transposed with per-sample coefficient ramping.
  *
- * SPDX-License-Identifier: MIT
+ * SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-EQForge-Commercial
  */
 #include "eqforge/biquad.h"
 
