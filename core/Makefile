@@ -22,6 +22,12 @@ SRC_DIR := src
 OBJ_DIR := build
 SRCS := $(wildcard $(SRC_DIR)/*.c)
 OBJS := $(patsubst $(SRC_DIR)/%.c,$(OBJ_DIR)/%.o,$(SRCS))
+# Header dependencies. Without -MMD an edit to a header (eqforge/version.h when
+# the version is bumped, types.h when a limit changes) left stale objects and
+# the test binary linked against the *old* library - a confusing failure that
+# only a `make clean` fixed.
+DEPS := $(OBJS:.o=.d)
+INCLUDES := -Iinclude -Iinclude/eqforge
 
 LIB_SHARED := build/libeqforge.so
 LIB_STATIC := build/libeqforge.a
@@ -34,7 +40,9 @@ $(OBJ_DIR):
 	mkdir -p $(OBJ_DIR)
 
 $(OBJ_DIR)/%.o: $(SRC_DIR)/%.c | $(OBJ_DIR)
-	$(CC) $(CSTD) $(CFLAGS) $(WARNINGS) $(CPPFLAGS) -fPIC -c $< -o $@
+	$(CC) $(CSTD) $(CFLAGS) $(WARNINGS) $(CPPFLAGS) $(INCLUDES) -MMD -MP -fPIC -c $< -o $@
+
+-include $(DEPS)
 
 $(LIB_SHARED): $(OBJS)
 	$(CC) -shared -o $@ $(OBJS) $(LDFLAGS)

@@ -60,6 +60,63 @@ Installs:
 * `~/.local/libexec/eqforge/eqforge-rt` — RT host
 * `eqforge` console script
 
+## One-script install and update
+
+`scripts/eqforge-update.sh` is both the installer and the updater. It is the
+only file a new user needs:
+
+```sh
+# from GitHub (nothing else required)
+curl -fsSL https://raw.githubusercontent.com/erfanjaster/eqforge/main/scripts/eqforge-update.sh | bash
+
+# or from a checkout you already have
+./scripts/eqforge-update.sh
+```
+
+What it decides by itself:
+
+| Machine state | What happens |
+|---|---|
+| nothing installed | full install: native core, rt host, SPA module (if its headers exist), python package in a private venv, login units offered |
+| ours installed, older revision | update in place; previous revision and native binaries kept for `--rollback` |
+| ours installed, same revision | "already up to date", no changes (exit 0) |
+| a `pip install --user` or a git checkout | installs its own managed copy, says so, and tells you how to remove the old one |
+
+Everything it manages lives in one place:
+
+```
+~/.local/bin/eqforge              symlink into the venv
+~/.local/bin/eqforge-rt           symlink to the native realtime host
+~/.local/lib/eqforge/             libeqforge.so + headers
+~/.local/libexec/eqforge/         eqforge-rt
+~/.local/lib/spa-0.2/eqforge/     SPA filter module
+~/.local/share/eqforge/venv/      python environment
+~/.local/share/eqforge/src/<ref>/ the source revision this build came from
+~/.local/share/eqforge/install.json   state: version, ref, source, prefix
+~/.local/share/eqforge/backups/   native binaries of the previous version
+```
+
+The venv is created with `--system-site-packages`, so distribution packages
+(`python3-numpy`, `python3-scipy`, `python3-soundfile`) satisfy the
+dependencies and an install works on a machine without PyPI access.
+
+Common invocations:
+
+```sh
+./scripts/eqforge-update.sh --check                 # installed vs. available
+./scripts/eqforge-update.sh --dry-run               # print the plan
+./scripts/eqforge-update.sh --ref v1.2.0            # pin a release
+./scripts/eqforge-update.sh --channel main          # tip of main
+./scripts/eqforge-update.sh --source-dir ~/src/eqforge --editable   # dev
+./scripts/eqforge-update.sh --rollback              # previous version
+./scripts/eqforge-update.sh --uninstall [--purge]   # remove
+```
+
+Existing systemd user units are stopped before binaries are replaced and
+restarted afterwards, so an update does not leave a half-linked audio graph
+behind. `--no-service`, `--no-autostart` and `--no-native` opt out of the
+three side effects an unattended run performs.
+
 ## Session integration
 
 ```sh
@@ -96,6 +153,15 @@ sink, daemon, RT host, and runs an end-to-end DSP self-test on synthetic
 audio. Everything should PASS (RT host is WARN until started — that's fine).
 
 ## Uninstall
+
+With the script (preferred - it also removes the venv and the units):
+
+```sh
+./scripts/eqforge-update.sh --uninstall          # keeps your profiles
+./scripts/eqforge-update.sh --uninstall --purge   # removes those too
+```
+
+By hand:
 
 ```sh
 rm -rf ~/.local/lib/eqforge ~/.local/include/eqforge \

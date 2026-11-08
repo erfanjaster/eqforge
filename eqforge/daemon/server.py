@@ -3,10 +3,12 @@
 Single process, three threads:
   - RPC loop on $XDG_RUNTIME_DIR/eqforge/daemon.sock (line-delimited JSON)
   - HTTP server on 127.0.0.1 (GUI assets, /api/* REST, /api/events SSE)
-  - device watcher: polls the PipeWire graph (~2 s) and applies matching
-    rules when auto-switch is enabled; emits SSE events on changes. With
-    `auto_wire` it also re-links any stream that stopped passing through
-    the rt host, and with `manage_rt` it keeps that host alive.
+  - device watcher: follows the PipeWire graph - driven by registry events
+    (`pw-dump -m`, reaction in tens of ms) with a ~2 s poll as the safety
+    net - and applies matching rules when auto-switch is enabled; emits SSE
+    events on changes. With `auto_wire` it also re-links any stream that
+    stopped passing through the rt host, and with `manage_rt` it keeps that
+    host alive.
 
 Why the watcher owns re-wiring: PipeWire destroys a stream node when a
 player stops and creates a fresh one when it starts, which WirePlumber
@@ -84,6 +86,9 @@ class Daemon:
     _rt_stop_requested = False
     _wire_sig: str | None = None
     _wire_ok = False
+    _watch = None
+    _graph_wake = None
+    graph_events = 0
 
     def __init__(self, auto_wire: bool | None = None, manage_rt: bool = False,
                  rt_channels: int = 2, tick: float = 2.0,
@@ -101,6 +106,15 @@ class Daemon:
         self._rt_stop_requested = False
         self._wire_sig: str | None = None
         self._wire_ok = False
+        # Event-driven reaction to the PipeWire graph. The polling tick stays
+        # as the safety net (it also covers default-sink metadata changes and
+        # a monitor that died), but a stream appearing must not wait 2 s:
+        # `watch.GraphWatcher` wakes the loop the moment PipeWire reports the
+        # new node, which is what turns "the first second is unprocessed"
+        # into "the first ~50 ms is".
+        self._graph_wake = threading.Event()
+        self._watch = None
+        self.graph_events = 0
         # `auto_wire=None` means "whatever config.json says", so a daemon
         # started by hand behaves like the one systemd starts. It is off
         # unless asked for: the daemon is spawned implicitly by ordinary
@@ -158,6 +172,16 @@ class Daemon:
             # EngineState, so they are added here.
             s["auto_wire"] = self.auto_wire
             s["manage_rt"] = self.manage_rt
+            # How the daemon learns about graph changes: event-driven (ms) or
+            # polled (s). Reported so `eqforge status` can tell the user which
+            # one they are getting - it is the difference between "the first
+            # ~50 ms is unprocessed" and "the first second is".
+            watch = self._watch
+            s["watch"] = (watch.stats() if watch is not None else
+                          {"running": False, "event_capable": False,
+                           "events": self.graph_events,
+                           "raw_events": 0, "restarts": 0, "command": [],
+                           "error": None})
             return s
 
         if method == "set_profile":
@@ -372,7 +396,59 @@ class Daemon:
                         self._auto_wire(view)
             except Exception:  # noqa: BLE001 - watcher must never die
                 log.debug("watcher error:\n%s", traceback.format_exc())
+            self._wait_for_work()
+
+    def _wait_for_work(self) -> None:
+        """Sleep until the next tick *or* a graph event, whichever is first.
+
+        The tick is the safety net: it still catches default-sink metadata
+        changes, a monitor process that died, and events that raced a pass.
+        A graph event wakes the loop immediately, so a player that starts a
+        new stream is routed through the processor in tens of milliseconds
+        instead of up to `tick` seconds.
+        """
+        wake = self._graph_wake
+        if wake is None:                      # constructed without run_forever
             self.stop_event.wait(self.tick)
+            return
+        # Wait for either a graph event or the tick, in short slices so that a
+        # plain `stop_event.set()` (tests, or a shutdown that does not go
+        # through stop()) still ends the loop promptly.
+        deadline = time.monotonic() + self.tick
+        while not self.stop_event.is_set():
+            left = deadline - time.monotonic()
+            if left <= 0:
+                return
+            if wake.wait(min(left, 0.2)):
+                wake.clear()
+                return
+
+    # ---------------- event-driven graph watching ----------------
+    def _start_graph_watch(self) -> None:
+        """Subscribe to PipeWire registry events (best effort)."""
+        if self._watch is not None:
+            return
+        from eqforge.system.watch import GraphWatcher
+        watch = GraphWatcher(self._on_graph_event)
+        if watch.start():
+            self._watch = watch
+            log.info("graph events: watching via %s", " ".join(watch.stats()["command"]))
+        else:
+            self._watch = None
+            log.info("graph events unavailable; falling back to %.1fs polling",
+                     self.tick)
+
+    def _on_graph_event(self, reason: str = "graph") -> None:
+        """Called from the watcher thread; must stay trivial."""
+        self.graph_events += 1
+        wake = self._graph_wake
+        if wake is not None:
+            wake.set()
+
+    def _stop_graph_watch(self) -> None:
+        watch, self._watch = self._watch, None
+        if watch is not None:
+            watch.stop()
 
     # ---------------- rt host supervision (optional) ----------------
     def _ensure_rt_host(self) -> None:
@@ -523,6 +599,12 @@ class Daemon:
 
     def stop(self) -> None:
         self.stop_event.set()
+        # Wake the watcher loop out of its `_wait_for_work()` sleep so shutdown
+        # is immediate instead of up to one poll interval late.
+        wake = self._graph_wake
+        if wake is not None:
+            wake.set()
+        self._stop_graph_watch()
         # Only tear down an rt host this daemon launched; one owned by
         # systemd (or started by hand) must survive the daemon.
         if self._rt_proc is not None:
@@ -548,6 +630,7 @@ class Daemon:
         sock_path = paths.daemon_socket()
         if sock_path.exists() and self._socket_alive(sock_path):
             raise RuntimeError("daemon already running")
+        self._start_graph_watch()
         threading.Thread(target=self.watcher_loop, daemon=True).start()
         if http:
             self.serve_http(port=port)

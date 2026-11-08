@@ -35,7 +35,7 @@ def run_cli(args: list[str], tmp_path: Path, expect_rc: int = 0,
 
 def test_cli_version(isolated_home):
     r = run_cli(["version"], isolated_home)
-    assert "eqforge 1.0.0" in r.stdout
+    assert "eqforge 1.1.0" in r.stdout
 
 
 def test_cli_list_profiles(isolated_home):

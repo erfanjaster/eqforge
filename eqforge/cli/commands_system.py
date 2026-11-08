@@ -94,11 +94,39 @@ def cmd_status(args) -> int:
                                f"@ {rt.get('sample_rate', '?')} Hz"),
                 ("momentary", f"{rt.get('momentary_lufs', -70):.1f} LUFS"),
             ]
+        # How the graph is followed. This is worth a line of its own: it is the
+        # difference between "the first ~50 ms of playback is unprocessed" and
+        # "the first second is".
+        watch = st.get("watch") or {}
+        if watch.get("running"):
+            rows.append(("graph events",
+                         out.green(f"events via {Path(watch['command'][0]).name}"
+                                   if watch.get("command") else "events")
+                         + out.dim(f" ({watch.get('events', 0)} events, "
+                                   f"{watch.get('restarts', 0)} restarts)")))
+        else:
+            rows.append(("graph events",
+                         out.dim("polling only")
+                         + (out.dim(f" ({watch['error']})")
+                            if watch.get("error") else "")))
     from eqforge.system import pipewire as pw
     rows.append(("pipewire", out.green("available") if pw.pipewire_available()
                  else out.dim("not found")))
     if pw.pipewire_available():
         rows.append(("default sink", pw.default_sink() or "?"))
+        try:
+            from eqforge.system import always_on as ao
+            ao_state = ao.status()
+        except EQForgeError:
+            ao_state = None
+        if ao_state and ao_state["installed"]:
+            if ao_state["ok"]:
+                word = out.green(f"active → {ao_state['node']}")
+            elif not ao_state["node_present"]:
+                word = out.yellow(f"{ao_state['node']} not in graph")
+            else:
+                word = out.yellow("installed, target missing")
+            rows.append(("always-on", word))
     out.echo(out.kv_table(rows, indent="\n  "))
     out.echo()
     return 0
@@ -368,6 +396,9 @@ def cmd_system(args) -> int:
     if action == "autostart":
         return cmd_autostart(args)
 
+    if action == "always-on":
+        return cmd_always_on(args)
+
     raise EQForgeError(f"unknown system action {action!r}")
 
 
@@ -491,6 +522,99 @@ def _set_auto_wire_config(value: bool) -> None:
     cfg = store.config()
     cfg["auto_wire"] = value
     store.save_config(cfg)
+
+
+def cmd_always_on(args) -> int:
+    """`eqforge system always-on on|off|status`.
+
+    Routing policy, not routing repair: this installs a WirePlumber rule that
+    points *new* playback streams at EQForge, so they are processed from their
+    first sample instead of being rewritten into the processor a moment later
+    (which is audible as "the first second has no EQ").
+    """
+    from eqforge.system import always_on as ao
+
+    mode = str(getattr(args, "autostart_action", None) or "status").lower()
+    node = getattr(args, "node", None)
+    as_json = bool(getattr(args, "json", False))
+
+    if mode == "on":
+        try:
+            report = ao.enable(node, restart=bool(getattr(args, "now", False)),
+                               force=bool(getattr(args, "force", False)))
+        except EQForgeError as e:
+            if as_json:
+                out.echo_json({"ok": False, "error": e.message,
+                               "hint": e.hint or ""})
+            else:
+                out.echo(out.yellow(f"  ! {e.message}"))
+                if e.hint:
+                    out.echo(out.dim(f"    {e.hint}"))
+            return 1
+        if as_json:
+            out.echo_json(dict(report, ok=True))
+            return 0
+        word = {"created": out.green("created"),
+                "same": out.dim("unchanged"),
+                "updated": out.yellow("updated")}.get(report["status"],
+                                                      report["status"])
+        out.echo(f"  {out.green('✓')} always-on routing: streams → "
+                 f"{out.cyan(report['node'])}")
+        out.echo(f"    {word}  {report['file']}")
+        if report.get("backup"):
+            out.echo(out.dim(f"    previous version saved as {report['backup']}"))
+        if report["restarted"]:
+            out.echo(f"    {out.green('✓')} wireplumber restarted")
+        else:
+            out.echo(out.dim("    apply it with: systemctl --user restart "
+                             "wireplumber"))
+        out.echo(out.dim("""
+  What this changes: new application streams are created on EQForge's inputs,
+  so the very first sample is processed instead of the first ~50 ms being
+  rewired by the daemon (or up to 2 s with polling). The daemon still watches
+  the graph and will re-route anything the policy does not cover.
+"""))
+        return 0
+
+    if mode == "off":
+        res = ao.disable()
+        if as_json:
+            out.echo_json(res)
+            return 0
+        if res["removed"]:
+            out.echo(f"  {out.green('✓')} always-on rule removed "
+                     f"({res['file']})")
+            out.echo(out.dim("    apply it with: systemctl --user restart "
+                             "wireplumber"))
+            out.echo(out.dim("    (the daemon keeps re-routing streams, just "
+                             "not before their first sample)"))
+        else:
+            out.echo(out.dim("  always-on rule was not installed"))
+        return 0
+
+    st = ao.status()
+    if as_json:
+        out.echo_json(st)
+        return 0 if st["ok"] else 1
+    ver = st["wireplumber"]
+    rows = [
+        ("rule file", out.green(str(st["file"])) if st["installed"]
+         else out.dim("not installed")),
+        ("target node", out.cyan(st["node"] or "—")),
+        ("node in graph", out.green("yes") if st["node_present"]
+         else out.dim("no")),
+        ("wireplumber", ".".join(map(str, ver)) if ver else "unknown"),
+        ("node.rules", out.green("supported") if st["supported"]
+         else out.yellow("unsupported by this WirePlumber")),
+    ]
+    out.echo(out.kv_table(rows, indent="\n  "))
+    out.echo()
+    if st["installed"] and not st["node_present"]:
+        out.echo(out.yellow(
+            "  ! the rule targets a node that is not in the graph right now: "
+            "start processing\n    (`eqforge system start`) or re-run "
+            "`eqforge system always-on on`"))
+    return 0 if st["ok"] else 1
 
 
 def cmd_autostart(args) -> int:

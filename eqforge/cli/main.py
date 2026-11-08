@@ -13,6 +13,7 @@ Usage overview (see docs/cli.md for the full manual):
   eqforge daemon start|stop|restart|status|run [--auto-wire] [--manage-rt]
   eqforge gui
   eqforge system setup|start|stop|status|wire|autostart on|off|status
+  eqforge system always-on on|off|status
   eqforge doctor [--build-core] | synth SIG OUT | version
 """
 from __future__ import annotations
@@ -205,10 +206,20 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = add_parser("system", help="system-wide processing (rt host)")
     sp.add_argument("action", choices=("setup", "start", "stop", "status",
-                                       "wire", "autostart"))
+                                       "wire", "autostart", "always-on"))
     sp.add_argument("autostart_action", nargs="?",
                     choices=("on", "off", "status"), default="status",
-                    help="for `system autostart`")
+                    help="for `system autostart` and `system always-on`")
+    sp.add_argument("--node", help="with `system always-on`: PipeWire node "
+                                   "name application streams are routed to "
+                                   "(default: auto-detect eqforge_filter, "
+                                   "then eqforge)")
+    sp.add_argument("--now", action="store_true",
+                    help="with `system always-on on|off`: restart WirePlumber "
+                         "so the change applies immediately")
+    sp.add_argument("--force", action="store_true",
+                    help="with `system always-on on`: write the rule even on "
+                         "a WirePlumber version that may ignore it")
     sp.add_argument("--rt-binary", help="path to eqforge-rt")
     sp.add_argument("--channels", type=int)
     sp.add_argument("--manage", action="store_true",

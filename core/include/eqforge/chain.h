@@ -85,6 +85,12 @@ int eqf_chain_process(eqf_chain *c, float *const *in, float *const *out, uint32_
 /* Latency in frames introduced by the current configuration. */
 uint32_t eqf_chain_latency(const eqf_chain *c);
 
+/* Channels the chain was built for. Hosts need this to refuse to run a chain
+ * whose layout disagrees with the buffers being handed to it (which would
+ * silently drop channels) - the SPA module, for instance, has a live chain
+ * from node creation, i.e. before the first format negotiation. */
+uint32_t eqf_chain_channels(const eqf_chain *c);
+
 /* Most recent meter/state snapshot. */
 const eqf_chain_stats *eqf_chain_snapshot(const eqf_chain *c);
 const eqf_chain_stats *eqf_chain_meters(const eqf_chain *c);

@@ -39,6 +39,7 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "eqforge/eqforge.h"
@@ -75,6 +76,18 @@ struct rt_state {
     char socket_path[108];
     int listen_fd;
     pthread_t ctl_thread;
+
+    /* Initial config, kept so it can be retried.
+     *
+     * At login the host is started by systemd as soon as PipeWire is up,
+     * while the daemon that publishes active-dsp.json may still be starting.
+     * A failed first load used to leave the host running *unconfigured* -
+     * i.e. passing audio through untouched - until the daemon happened to
+     * push a reload, which is exactly the "the first second has no EQ"
+     * behaviour. Keeping the path lets the control thread retry until the
+     * file appears. Cleared once a chain is live. */
+    char initial_config[512];
+    unsigned config_retries;
 };
 
 static struct rt_state g_state;
@@ -282,6 +295,12 @@ static void handle_command(struct rt_state *st, const char *line,
             if (rate == 0)
                 rate = jack_get_sample_rate(st->client);
             int rc = build_and_publish(st, path, rate);
+            if (rc == EQF_OK) {
+                /* A live chain from an explicit reload supersedes the config
+                 * we were launched with: stop retrying it. */
+                st->initial_config[0] = '\0';
+                st->config_retries = 0;
+            }
             pthread_mutex_unlock(&st->reload_lock);
             if (rc == EQF_OK)
                 reap_retired(st);
@@ -389,6 +408,39 @@ static void *ctl_thread(void *arg)
                     fprintf(stderr,
                             "eqforge-rt: rebuild for %u Hz failed: %s\n",
                             rate, eqf_result_str(rc));
+            }
+        }
+        /* Retry a config that was not there yet at start-up (see
+         * initial_config). Cheap: one stat/parse per second until it works. */
+        if (st->initial_config[0] &&
+            atomic_load_explicit(&st->chain, memory_order_acquire) == NULL) {
+            /* Every pass through this loop is one 200 ms poll timeout, so a
+             * missing config is retried ~5x/s: fast enough that the host is
+             * processing before a human can press play, slow enough that a
+             * config that never appears costs a few stat() calls. */
+            static struct timespec last_try;
+            struct timespec now;
+            clock_gettime(CLOCK_MONOTONIC, &now);
+            long since_ms = (now.tv_sec - last_try.tv_sec) * 1000L +
+                            (now.tv_nsec - last_try.tv_nsec) / 1000000L;
+            if (since_ms >= 200) {
+                last_try = now;
+                pthread_mutex_lock(&st->reload_lock);
+                uint32_t rate = atomic_load(&st->rate_wanted);
+                if (rate == 0)
+                    rate = jack_get_sample_rate(st->client);
+                int rc = build_and_publish(st, st->initial_config, rate);
+                pthread_mutex_unlock(&st->reload_lock);
+                if (rc == EQF_OK) {
+                    fprintf(stderr, "eqforge-rt: config '%s' loaded\n",
+                            st->initial_config);
+                    st->initial_config[0] = '\0';
+                    reap_retired(st);
+                } else if (st->config_retries++ % 150 == 0) {
+                    fprintf(stderr,
+                            "eqforge-rt: waiting for config '%s' (%s)\n",
+                            st->initial_config, eqf_result_str(rc));
+                }
             }
         }
         struct pollfd pfd = { .fd = st->listen_fd, .events = POLLIN };
@@ -509,6 +561,9 @@ int main(int argc, char **argv)
     {
         uint32_t rate = jack_get_sample_rate(st->client);
         atomic_store(&st->rate_wanted, rate);
+        if (config)
+            snprintf(st->initial_config, sizeof(st->initial_config), "%s",
+                     config);
         int rc = build_and_publish(st, config, rate);
         if (rc != EQF_OK && !config) {
             /* No initial config is legitimate (pass-through), but a failure to

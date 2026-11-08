@@ -577,6 +577,11 @@ bool eqf_chain_get_bypass(const eqf_chain *c)
     return c ? c->bypass : true;
 }
 
+uint32_t eqf_chain_channels(const eqf_chain *c)
+{
+    return c ? c->channels : 0;
+}
+
 uint32_t eqf_chain_latency(const eqf_chain *c)
 {
     if (!c)

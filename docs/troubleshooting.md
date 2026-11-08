@@ -55,6 +55,25 @@ Common causes: module not in the SPA search path (must be under
 passes audio through — check `active-dsp.json` exists: run any
 `eqforge set-profile` to regenerate it).
 
+**The first second of playback is not equalized (then the EQ "snaps in")**
+That is a *routing timing* symptom, not an engine bug: the stream was linked
+to the default sink by WirePlumber, and EQForge re-routed it a moment later.
+Check which mechanism is active:
+
+```sh
+eqforge status                      # "graph events" line: events or polling only
+eqforge system always-on status      # is the routing rule installed and live?
+```
+
+Fixes, in increasing order of completeness:
+
+1. `eqforge system always-on on --now` - new streams are created on EQForge's
+   inputs, so the first sample is processed (WirePlumber >= 0.5).
+2. If `graph events` says "polling only", `pw-dump -m` is unavailable
+   (PipeWire < 0.3.56): upgrade PipeWire, or accept the ~2 s fallback.
+3. If the rt host was started before `active-dsp.json` existed, it now retries
+   its config ~5x/s; check `journalctl --user -u eqforge-rt | grep waiting`.
+
 **Glitches / xruns under load**
 `pw-top` shows per-node xrun counts. Remedies: raise the quantum
 (`pw-metadata -n settings 0 default.clock.force-quantum 2048`), ensure the

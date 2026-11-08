@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "eqforge"
-version = "1.0.0"
+version = "1.1.0"
 description = "EQForge - profile-driven smart audio processing for Linux (native C DSP core + PipeWire integration)"
 readme = "README.md"
 # Dual-licensed: GPLv3 for everyone, plus a commercial license for

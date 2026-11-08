@@ -232,7 +232,18 @@ static void *config_watcher(void *arg)
 {
     struct impl *this = (struct impl *)arg;
     while (atomic_load(&this->watcher_run)) {
-        struct timespec ts = { .tv_sec = 0, .tv_nsec = 500000000 };
+        /* Two speeds, because the two cases are not equally audible:
+         *  - no live chain yet (the config file did not exist when the node
+         *    was created, e.g. the daemon publishes active-dsp.json after
+         *    PipeWire starts): everything is passed through unprocessed right
+         *    now, so look for the file 10x per second;
+         *  - a chain is live and only a *change* is pending: half a second of
+         *    extra latency before a profile edit takes effect is inaudible and
+         *    keeps the stat() traffic negligible. */
+        bool unconfigured = atomic_load(&this->chain) == NULL;
+        struct timespec ts = { .tv_sec = 0,
+                               .tv_nsec = unconfigured ? 100000000L
+                                                       : 500000000L };
         nanosleep(&ts, NULL);
         impl_collect_retired(this);
         if (atomic_load(&this->swap_requested))
@@ -967,6 +978,15 @@ static int impl_process(void *object)
     impl_apply_pending_swap(this);
     eqf_chain *chain = atomic_load_explicit(&this->chain, memory_order_acquire);
 
+    /* A chain is built at node creation (see impl_factory_init) so that the
+     * very first sample is processed. Until a format is negotiated it is built
+     * for the default layout, so guard the hand-off: running a chain whose
+     * channel count disagrees with the buffers would silently drop channels
+     * (or write past them). Pass through until configure_format() has staged
+     * the correctly sized chain. */
+    if (chain && eqf_chain_channels(chain) != this->channels)
+        chain = NULL;
+
     /* Propagate a props-driven mute onto the live chain. eqf_chain_set_bypass()
      * starts a crossfade, so it must only be called on an edge - calling it
      * every cycle would restart the fade forever and silence the node. */
@@ -1112,6 +1132,19 @@ static int impl_factory_init(const struct spa_handle_factory *factory,
 
     atomic_store(&this->cfg_channels, this->channels);
     atomic_store(&this->cfg_rate, this->rate);
+    /* Build the chain *here*, on the control thread, before any format is
+     * negotiated - and therefore before the first sample can arrive.
+     *
+     * The previous order (let the ~2 Hz config watcher pick the file up after
+     * negotiation) meant a freshly started node had no live chain for up to
+     * half a second, and process() correctly passes audio through when there
+     * is no chain. PipeWire happily feeds it audio in that window, so the
+     * first fraction of a second of every playback after login came out
+     * unprocessed and then "snapped" into the equalizer. Loading eagerly
+     * costs one stat + parse at node creation and removes the window
+     * entirely; a format negotiation still rebuilds at the negotiated rate. */
+    if (impl_update_config(this, true))
+        impl_apply_pending_swap(this);      /* no data thread yet: safe here */
     /* Start watching now: after the first format negotiation config_mtime is
      * already current, so a watcher started later can only see subsequent
      * changes - which is what we want, but the node may be created long before

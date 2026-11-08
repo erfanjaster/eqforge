@@ -1,0 +1,3132 @@
+From 5e947c1b68ad315359c23ec8ac0b7f806fcc6d9e Mon Sep 17 00:00:00 2001
+From: EQForge <dev@eqforge.local>
+Date: Sun, 8 Nov 2026 19:23:24 +0000
+Subject: [PATCH] Process audio from the first sample; one-script
+ install/update
+
+Three windows let unprocessed audio reach the speakers after playback started:
+
+1. the daemon learned about the graph on a 2 s poll, so a stream that
+   WirePlumber had linked to the default sink was re-routed up to 2 s late
+   (the reported symptom: 'the first second has no EQ, then it snaps in').
+   It now follows PipeWire registry events (pw-dump -m) and reacts in
+   ~30-60 ms. New: eqforge/system/watch.py. The poll stays as the safety net.
+2. a stream exists on the sink before anyone can move it, so
+   'eqforge system always-on on' writes a WirePlumber node.rules drop-in that
+   creates new playback streams on EQForge's inputs. New:
+   eqforge/system/always_on.py, with guard rails (live node required, only
+   Stream/Output/Audio matched, old WirePlumber refused).
+3. a node or host started before active-dsp.json existed ran as pass-through
+   until the next config poll: the SPA node now builds its chain at node
+   creation and polls a missing config 10x/s, eqforge-rt retries ~5x/s.
+
+Also: eqforge status reports the watch channel and always-on state;
+scripts/eqforge-update.sh installs and updates from GitHub with a private
+venv, versioned sources, native backup, --check/--rollback/--uninstall and
+service handling; core/Makefile tracks header dependencies; docs + tests.
+
+Version 1.1.0.
+---
+ CHANGELOG.md                   |  67 +++
+ README.md                      |  40 +-
+ core/Makefile                  |  10 +-
+ core/include/eqforge/chain.h   |   6 +
+ core/include/eqforge/version.h |   4 +-
+ core/src/chain.c               |   5 +
+ core/tests/test_core.c         |   4 +-
+ docs/cli.md                    |  16 +-
+ docs/installation.md           |  66 +++
+ docs/pipewire-integration.md   |  95 +++-
+ docs/quickstart-fa.md          | 108 +++++
+ docs/troubleshooting.md        |  19 +
+ eqforge/cli/commands_system.py | 124 ++++++
+ eqforge/cli/main.py            |  15 +-
+ eqforge/daemon/server.py       |  91 +++-
+ eqforge/system/always_on.py    | 223 ++++++++++
+ eqforge/system/watch.py        | 252 +++++++++++
+ eqforge/version.py             |   2 +-
+ packaging/install.sh           |   7 +
+ pipewire/module-eqforge.c      |  35 +-
+ pyproject.toml                 |   2 +-
+ rthost/eqforge-rt.c            |  55 +++
+ scripts/eqforge-update.sh      | 778 +++++++++++++++++++++++++++++++++
+ tests/test_always_on.py        | 157 +++++++
+ tests/test_cli.py              |   2 +-
+ tests/test_event_reaction.py   | 115 +++++
+ tests/test_updater.py          | 147 +++++++
+ tests/test_watch.py            | 181 ++++++++
+ 28 files changed, 2600 insertions(+), 26 deletions(-)
+ create mode 100644 CHANGELOG.md
+ create mode 100644 docs/quickstart-fa.md
+ create mode 100644 eqforge/system/always_on.py
+ create mode 100644 eqforge/system/watch.py
+ create mode 100755 scripts/eqforge-update.sh
+ create mode 100644 tests/test_always_on.py
+ create mode 100644 tests/test_event_reaction.py
+ create mode 100644 tests/test_updater.py
+ create mode 100644 tests/test_watch.py
+
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+new file mode 100644
+index 0000000..4e64533
+--- /dev/null
++++ b/CHANGELOG.md
+@@ -0,0 +1,67 @@
++# Changelog
++
++All notable changes to EQForge. Versions follow the package version in
++`eqforge/version.py` and `core/include/eqforge/version.h` (kept in sync).
++
++## 1.1.0 — processed from the first sample
++
++### Fixed
++
++* **The first moment of playback bypassed the processor.** Three separate
++  windows could let unprocessed audio reach the speakers, and users heard them
++  as one symptom: "the first second has no EQ, then the effects snap in".
++  * The daemon learned about the audio graph only on a 2 s poll, so a stream
++    that WirePlumber had linked straight to the default sink was re-routed up
++    to two seconds late. It now follows PipeWire registry events
++    (`pw-dump -m`, coalesced) and reacts in ~30–60 ms. New module:
++    `eqforge/system/watch.py`; the poll remains as the safety net.
++  * A stream still exists on the sink before anyone can move it. `eqforge
++    system always-on on` writes a WirePlumber `node.rules` drop-in that creates
++    new playback streams on EQForge's inputs, which removes the window
++    completely. New module: `eqforge/system/always_on.py`.
++  * The SPA filter node and `eqforge-rt` both ran as pass-through when they
++    started before `active-dsp.json` existed (a normal boot ordering). The
++    filter node now builds its chain at node creation and polls for a missing
++    config 10×/s; the rt host retries its config ~5×/s and says so in its log.
++* The daemon's shutdown no longer waits out one poll interval: `stop()` wakes
++  the watcher loop.
++
++### Added
++
++* `eqforge system always-on on|off|status` (`--node`, `--now`, `--force`,
++  `--json`) — routing policy with guard rails: the target node must be live
++  before the rule is written, only `Stream/Output/Audio` is matched, and a
++  WirePlumber that cannot read `node.rules` is refused instead of obeyed.
++* `eqforge status` reports how the graph is followed (`graph events: events …
++  | polling only`) and whether always-on routing is active.
++* `scripts/eqforge-update.sh` — one script that installs **and** updates from
++  GitHub: private venv (`--system-site-packages`), per-revision source
++  directories, native backup of the previous build, `--check`, `--dry-run`,
++  `--ref`, `--channel`, `--source-dir`, `--editable`, `--rollback`,
++  `--uninstall [--purge]`, `--self-test`, and automatic stop/restart of the
++  systemd user units around the swap.
++* `eqforge_chain_channels()` in the C API, so a host can refuse to run a chain
++  built for a different channel layout.
++* `docs/quickstart-fa.md` (Persian quick start), zero-gap section in
++  `docs/pipewire-integration.md`, events/always-on notes in `docs/cli.md`,
++  `docs/installation.md` and `docs/troubleshooting.md`.
++
++### Changed
++
++* `core/Makefile` tracks header dependencies (`-MMD -MP`): bumping a version
++  header no longer leaves stale objects behind, which used to make
++  `make -C core test` fail with a version mismatch until `make clean`.
++* The install order in `packaging/install.sh` is unchanged, but its header now
++  points at `scripts/eqforge-update.sh` for anything outside a checkout.
++
++### Tests
++
++* `tests/test_watch.py` — prompt delivery, burst coalescing, irrelevant events
++  ignored, callback exceptions survived, missing/dead monitors degradable.
++* `tests/test_event_reaction.py` — an event wakes the daemon and produces a
++  rewiring pass in well under the poll interval; status exposes the channel.
++* `tests/test_always_on.py` — rule content, idempotency, backup on edit,
++  refusal without a live node, refusal on old WirePlumber, `off` semantics,
++  CLI wiring.
++* `tests/test_updater.py` — `--self-test`, `--dry-run` writes nothing, `--check`
++  on an empty home, state roundtrip, error paths.
+diff --git a/README.md b/README.md
+index d1d1741..87cd7e7 100644
+--- a/README.md
++++ b/README.md
+@@ -8,7 +8,7 @@ A native C11 DSP core with a real-time-safe contract, first-class PipeWire
+ integration, measurement-grade analysis, and a control plane you can script.
+ 
+ [![License: GPLv3 or commercial](https://img.shields.io/badge/license-GPLv3_or_commercial-2f6feb?style=flat-square)](#licensing)
+-[![Version](https://img.shields.io/badge/version-1.0.0-1f9d55?style=flat-square)](https://github.com/erfanjaster/eqforge)
++[![Version](https://img.shields.io/badge/version-1.1.0-1f9d55?style=flat-square)](https://github.com/erfanjaster/eqforge)
+ [![Python](https://img.shields.io/badge/python-%E2%89%A53.10-3572A5?style=flat-square)](#requirements)
+ [![Platform](https://img.shields.io/badge/platform-Linux-e95420?style=flat-square)](#requirements)
+ [![Audio](https://img.shields.io/badge/audio-PipeWire_%C2%B7_JACK-0aa5a5?style=flat-square)](#set-it-once-self-maintaining-system-audio)
+@@ -123,9 +123,11 @@ control socket. Device and stream discovery from the PipeWire graph, rule-based
+ auto-switching per device (Bluetooth headphones plug in → your headphone
+ profile activates), desktop notifications, systemd user units, XDG paths.
+ 
+-**Self-maintaining** — login units for both the host and the daemon, and an
+-auto-wire watcher that re-links application streams through the processor when
+-a player restarts. Crash of the real-time host is recovered automatically. See
++**Self-maintaining** — login units for both the host and the daemon, an
++event-driven watcher that re-links application streams through the processor in
++tens of milliseconds when a player restarts, and an optional WirePlumber policy
++that routes new streams through the processor from their first sample. Crash of
++the real-time host is recovered automatically. See
+ [below](#set-it-once-self-maintaining-system-audio).
+ 
+ **File processing** — `eqforge apply` / `batch` render files through the same
+@@ -145,6 +147,15 @@ core can't load), corrupt-config quarantine, stale-socket recovery, and
+ 
+ ## Install
+ 
++One script installs, updates and rolls back — it detects what is already on the
++machine and does the right thing either way:
++
++```sh
++curl -fsSL https://raw.githubusercontent.com/erfanjaster/eqforge/main/scripts/eqforge-update.sh | bash
++```
++
++Then, or by hand from a checkout:
++
+ ```sh
+ # 1. build the native core (needs gcc + make; ~5 seconds)
+ make -C core
+@@ -221,6 +232,27 @@ implicitly by ordinary commands (`eqforge status`), and silently rewiring
+ someone's audio graph from there would be a nasty surprise — so it only rewires
+ when you have asked for it, and that preference is persisted.
+ 
++### Processed from the first sample, not the second one
++
++Re-routing a stream is always slightly late: by the time anyone can move it,
++the player has already started feeding the sink. Three windows existed and all
++three are closed:
++
++| Window | Was | Now |
++|---|---|---|
++| 0 – 2 s | the graph was polled every 2 s, so a re-routed stream could play unprocessed for up to two seconds | the daemon reacts to PipeWire registry events (`pw-dump -m`): **~30–60 ms**, coalesced into one pass per playback start |
++| ~0 – 60 ms | even an instant reaction happens *after* the stream exists | `eqforge system always-on on` installs a WirePlumber rule that creates new streams on EQForge's inputs — **zero** unprocessed samples |
++| 0 – 500 ms | a host or filter node that started before `active-dsp.json` existed ran as pass-through until the next config poll | the SPA node loads its config at creation and looks for a missing file 10×/s; `eqforge-rt` retries ~5×/s until it appears |
++
++```sh
++eqforge system always-on on --now   # policy: streams start on EQForge
++eqforge system always-on status     # is it installed, is the target live?
++eqforge status                      # "graph events" line: events vs. polling
++```
++
++The poll remains as the safety net (default-sink metadata, a dead monitor, a
++shadowing policy), so nothing degrades if events are unavailable.
++
+ Details: [docs/pipewire-integration.md](docs/pipewire-integration.md).
+ 
+ ## The one-minute tour
+diff --git a/core/Makefile b/core/Makefile
+index 7686c6f..c6ba6c3 100644
+--- a/core/Makefile
++++ b/core/Makefile
+@@ -22,6 +22,12 @@ SRC_DIR := src
+ OBJ_DIR := build
+ SRCS := $(wildcard $(SRC_DIR)/*.c)
+ OBJS := $(patsubst $(SRC_DIR)/%.c,$(OBJ_DIR)/%.o,$(SRCS))
++# Header dependencies. Without -MMD an edit to a header (eqforge/version.h when
++# the version is bumped, types.h when a limit changes) left stale objects and
++# the test binary linked against the *old* library - a confusing failure that
++# only a `make clean` fixed.
++DEPS := $(OBJS:.o=.d)
++INCLUDES := -Iinclude -Iinclude/eqforge
+ 
+ LIB_SHARED := build/libeqforge.so
+ LIB_STATIC := build/libeqforge.a
+@@ -34,7 +40,9 @@ $(OBJ_DIR):
+ 	mkdir -p $(OBJ_DIR)
+ 
+ $(OBJ_DIR)/%.o: $(SRC_DIR)/%.c | $(OBJ_DIR)
+-	$(CC) $(CSTD) $(CFLAGS) $(WARNINGS) $(CPPFLAGS) -fPIC -c $< -o $@
++	$(CC) $(CSTD) $(CFLAGS) $(WARNINGS) $(CPPFLAGS) $(INCLUDES) -MMD -MP -fPIC -c $< -o $@
++
++-include $(DEPS)
+ 
+ $(LIB_SHARED): $(OBJS)
+ 	$(CC) -shared -o $@ $(OBJS) $(LDFLAGS)
+diff --git a/core/include/eqforge/chain.h b/core/include/eqforge/chain.h
+index fdcfcff..11f94e9 100644
+--- a/core/include/eqforge/chain.h
++++ b/core/include/eqforge/chain.h
+@@ -85,6 +85,12 @@ int eqf_chain_process(eqf_chain *c, float *const *in, float *const *out, uint32_
+ /* Latency in frames introduced by the current configuration. */
+ uint32_t eqf_chain_latency(const eqf_chain *c);
+ 
++/* Channels the chain was built for. Hosts need this to refuse to run a chain
++ * whose layout disagrees with the buffers being handed to it (which would
++ * silently drop channels) - the SPA module, for instance, has a live chain
++ * from node creation, i.e. before the first format negotiation. */
++uint32_t eqf_chain_channels(const eqf_chain *c);
++
+ /* Most recent meter/state snapshot. */
+ const eqf_chain_stats *eqf_chain_snapshot(const eqf_chain *c);
+ const eqf_chain_stats *eqf_chain_meters(const eqf_chain *c);
+diff --git a/core/include/eqforge/version.h b/core/include/eqforge/version.h
+index f5ccadb..9fc812f 100644
+--- a/core/include/eqforge/version.h
++++ b/core/include/eqforge/version.h
+@@ -6,9 +6,9 @@
+ #define EQFORGE_VERSION_H
+ 
+ #define EQF_VERSION_MAJOR 1
+-#define EQF_VERSION_MINOR 0
++#define EQF_VERSION_MINOR 1
+ #define EQF_VERSION_PATCH 0
+-#define EQF_VERSION_STRING "1.0.0"
++#define EQF_VERSION_STRING "1.1.0"
+ 
+ /* Bumped whenever the public ABI changes incompatibly. */
+ #define EQF_ABI_VERSION 1
+diff --git a/core/src/chain.c b/core/src/chain.c
+index 22f22d4..142c086 100644
+--- a/core/src/chain.c
++++ b/core/src/chain.c
+@@ -577,6 +577,11 @@ bool eqf_chain_get_bypass(const eqf_chain *c)
+     return c ? c->bypass : true;
+ }
+ 
++uint32_t eqf_chain_channels(const eqf_chain *c)
++{
++    return c ? c->channels : 0;
++}
++
+ uint32_t eqf_chain_latency(const eqf_chain *c)
+ {
+     if (!c)
+diff --git a/core/tests/test_core.c b/core/tests/test_core.c
+index 6b937b7..4b7f7e3 100644
+--- a/core/tests/test_core.c
++++ b/core/tests/test_core.c
+@@ -557,6 +557,8 @@ static void test_chain(void)
+     eqf_chain *c = eqf_chain_new(2, 48000, 1024);
+     CHECK(c != NULL);
+     CHECK(eqf_chain_latency(c) == 0);
++    CHECK(eqf_chain_channels(c) == 2);
++    CHECK(eqf_chain_channels(NULL) == 0);
+ 
+     const char *cfg =
+         "{"
+@@ -735,7 +737,7 @@ static void test_chain_stats_copy(void)
+ static void test_version(void)
+ {
+     printf("test_version\n");
+-    CHECK(strcmp(eqf_version_string(), "1.0.0") == 0);
++    CHECK(strcmp(eqf_version_string(), "1.1.0") == 0);
+     CHECK(eqf_abi_version() == EQF_ABI_VERSION);
+ }
+ 
+diff --git a/docs/cli.md b/docs/cli.md
+index 58e2c85..e3d8176 100644
+--- a/docs/cli.md
++++ b/docs/cli.md
+@@ -89,13 +89,27 @@ in the GUI).
+ PipeWire sinks/sources (with kind classification: bluetooth/usb/hdmi/…) and
+ running application streams.
+ 
++### `eqforge system always-on on|off|status`
++Installs a WirePlumber routing rule so new application streams are created on
++EQForge's inputs - processed from their first sample instead of being
++re-routed a moment later. `--now` restarts WirePlumber to apply it; `--node`
++targets a specific node; `status` reports what is installed and whether the
++target is live. See
++[pipewire-integration](pipewire-integration.md#zero-gap-onset-the-first-second-has-no-eq-problem).
++
++```sh
++eqforge system always-on on --now
++eqforge system always-on status --json
++eqforge system always-on off
++```
++
+ ### `eqforge daemon start|stop|restart|status|run`
+ `run` is the foreground instance (used by systemd units and auto-spawn).
+ 
+ ### `eqforge gui [--port N] [--no-browser] [--wait]`
+ Serves the GUI on localhost and opens `xdg-open`.
+ 
+-### `eqforge system setup|start|stop|status|wire`
++### `eqforge system setup|start|stop|status|wire|always-on`
+ Manages native integration: writes PipeWire/systemd files (`setup`), runs the
+ JACK RT host (`start`, `--manage` to auto-connect to the default sink),
+ reports RT latency and engine telemetry (`status`).
+diff --git a/docs/installation.md b/docs/installation.md
+index e1785db..f9a17bd 100644
+--- a/docs/installation.md
++++ b/docs/installation.md
+@@ -60,6 +60,63 @@ Installs:
+ * `~/.local/libexec/eqforge/eqforge-rt` — RT host
+ * `eqforge` console script
+ 
++## One-script install and update
++
++`scripts/eqforge-update.sh` is both the installer and the updater. It is the
++only file a new user needs:
++
++```sh
++# from GitHub (nothing else required)
++curl -fsSL https://raw.githubusercontent.com/erfanjaster/eqforge/main/scripts/eqforge-update.sh | bash
++
++# or from a checkout you already have
++./scripts/eqforge-update.sh
++```
++
++What it decides by itself:
++
++| Machine state | What happens |
++|---|---|
++| nothing installed | full install: native core, rt host, SPA module (if its headers exist), python package in a private venv, login units offered |
++| ours installed, older revision | update in place; previous revision and native binaries kept for `--rollback` |
++| ours installed, same revision | "already up to date", no changes (exit 0) |
++| a `pip install --user` or a git checkout | installs its own managed copy, says so, and tells you how to remove the old one |
++
++Everything it manages lives in one place:
++
++```
++~/.local/bin/eqforge              symlink into the venv
++~/.local/bin/eqforge-rt           symlink to the native realtime host
++~/.local/lib/eqforge/             libeqforge.so + headers
++~/.local/libexec/eqforge/         eqforge-rt
++~/.local/lib/spa-0.2/eqforge/     SPA filter module
++~/.local/share/eqforge/venv/      python environment
++~/.local/share/eqforge/src/<ref>/ the source revision this build came from
++~/.local/share/eqforge/install.json   state: version, ref, source, prefix
++~/.local/share/eqforge/backups/   native binaries of the previous version
++```
++
++The venv is created with `--system-site-packages`, so distribution packages
++(`python3-numpy`, `python3-scipy`, `python3-soundfile`) satisfy the
++dependencies and an install works on a machine without PyPI access.
++
++Common invocations:
++
++```sh
++./scripts/eqforge-update.sh --check                 # installed vs. available
++./scripts/eqforge-update.sh --dry-run               # print the plan
++./scripts/eqforge-update.sh --ref v1.2.0            # pin a release
++./scripts/eqforge-update.sh --channel main          # tip of main
++./scripts/eqforge-update.sh --source-dir ~/src/eqforge --editable   # dev
++./scripts/eqforge-update.sh --rollback              # previous version
++./scripts/eqforge-update.sh --uninstall [--purge]   # remove
++```
++
++Existing systemd user units are stopped before binaries are replaced and
++restarted afterwards, so an update does not leave a half-linked audio graph
++behind. `--no-service`, `--no-autostart` and `--no-native` opt out of the
++three side effects an unattended run performs.
++
+ ## Session integration
+ 
+ ```sh
+@@ -97,6 +154,15 @@ audio. Everything should PASS (RT host is WARN until started — that's fine).
+ 
+ ## Uninstall
+ 
++With the script (preferred - it also removes the venv and the units):
++
++```sh
++./scripts/eqforge-update.sh --uninstall          # keeps your profiles
++./scripts/eqforge-update.sh --uninstall --purge   # removes those too
++```
++
++By hand:
++
+ ```sh
+ rm -rf ~/.local/lib/eqforge ~/.local/include/eqforge \
+        ~/.local/libexec/eqforge ~/.config/eqforge \
+diff --git a/docs/pipewire-integration.md b/docs/pipewire-integration.md
+index 682d23a..0dde98f 100644
+--- a/docs/pipewire-integration.md
++++ b/docs/pipewire-integration.md
+@@ -113,16 +113,96 @@ eqforge system wire
+ pw-link firefox:out_FL eqforge:in_1
+ ```
+ 
+-Streams started *after* wiring still go straight to the default sink; re-run
+-`eqforge system wire` to pull them in (stopping the rt host lets the session
+-manager route them back).
++Streams started *after* wiring are pulled in automatically: the daemon
++watches the graph and re-routes them (see below). The SPA path (A) is still
++tidier for full system-wide capture; the RT host shines for per-app routing,
++JACK workflows and non-PipeWire setups.
+ 
+-For *full* system-wide capture (every app), the SPA path (A) is cleaner; the
+-RT host shines for per-app routing, JACK workflows and non-PipeWire setups.
++## Zero-gap onset (the "first second has no EQ" problem)
++
++Both deployments sit between an application and the speakers, and the
++interesting question is not *whether* audio is processed but *from which
++sample*. There are three windows in which unprocessed audio can escape:
++
++| Window | Cause | Fix |
++|---|---|---|
++| 0 – 2 s | the daemon polled the graph every 2 s, so a stream that had been linked straight to the sink was re-routed up to 2 s late | registry events (`pw-dump -m`) instead of polling: `eqforge.system.watch` |
++| ~0 – 60 ms | even with instant reaction, the stream exists on the sink *before* anyone can move it | a WirePlumber rule that creates streams on EQForge's inputs: `eqforge system always-on on` |
++| ~0 – 500 ms | a node (or the rt host) that started before `active-dsp.json` existed ran as pass-through until the next config poll | the SPA node loads its config at creation and polls for a missing file 10×/s; `eqforge-rt` retries its config ~5×/s until it appears |
++
++`eqforge status` shows which mechanism is live:
++
++```
++  watch         : events via pw-dump -m (17 events, 0 restarts)
++  always-on     : eqforge_filter (installed)
++```
++
++### Event-driven reaction
++
++The daemon subscribes to PipeWire's registry events and runs its rewiring
++pass as soon as a `Node` or `Link` appears or disappears. A burst of events
++(one playback start produces a node, several ports and links) is coalesced
++into a single pass, so the cost per playback start is one `pw-dump` snapshot
++plus a few `pw-link` calls - measured at **~30-60 ms** from "the stream
++exists" to "the stream is processed", instead of up to 2 s.
++
++The 2 s tick stays as the safety net: it still catches default-sink metadata
++changes, a monitor process that died, and anything the event stream cannot
++report. Nothing regresses if `pw-dump -m` is unavailable (PipeWire < 0.3.56):
++the watcher reports `event_capable: false` and the daemon keeps polling.
++
++### Always-on routing policy (zero, not "small")
++
++A reaction always happens *after* the fact. The only way to make the first
++sample processed is for the stream to be created on EQForge's inputs in the
++first place, which is WirePlumber's decision:
++
++```sh
++eqforge system always-on on --now     # write the drop-in and restart WirePlumber
++eqforge system always-on status       # what is targeted, and is it live?
++eqforge system always-on off          # back to reaction-only
++```
++
++It writes `~/.config/wireplumber/wireplumber.conf.d/60-eqforge-streams.conf`:
++
++```conf
++# EQForge always-on routing (generated by `eqforge system always-on on`).
++node.rules = [
++    {
++        matches = [
++            { media.class = "Stream/Output/Audio" }
++        ]
++        actions = {
++            update-props = {
++                target.object = "eqforge_filter"
++            }
++        }
++    }
++]
++```
++
++Node name `eqforge_filter` (SPA module) or `eqforge` (rt host) is detected
++from the live graph; `--node NAME` overrides it. Guard rails, because a rule
++that points at a node nobody owns is how applications end up silent:
++
++* the target node must exist in the graph *before* the file is written -
++  otherwise the command fails and changes nothing;
++* only `Stream/Output/Audio` is matched: microphones, MIDI, camera audio and
++  other filter nodes are untouched;
++* WirePlumber < 0.5 does not read `node.rules` from a `.conf` drop-in, so it
++  is refused (`--force` overrides) with a pointer to
++  `packaging/wireplumber/50-eqforge.lua.example`;
++* `off` deletes the file; the daemon's rewiring keeps working exactly as
++  before.
++
++Both mechanisms layer deliberately: **policy for the first sample, events for
++whenever reality disagrees with policy** (another drop-in shadows the rule, a
++device hot-plugs, a player ignores the target).
+ 
+ ## Device awareness & auto-switching
+ 
+-The daemon polls the PipeWire graph every ~2 s (`pw-dump`) and:
++The daemon follows the PipeWire graph - event-driven, with a ~2 s poll as the
++safety net (`pw-dump`) - and:
+ 
+ 1. detects the current default sink and its stable identity
+    (name, ALSA card, bluez address, kind…),
+@@ -140,7 +220,8 @@ curl -X POST localhost:PORT/api/auto_switch -d '{"value": true}'
+ ```
+ 
+ Hot-plug behavior: when a Bluetooth headset connects and becomes the default
+-sink, your `bluez_address`-matched profile activates within ~2 s. When it
++sink, your `bluez_address`-matched profile activates within tens of
++milliseconds (graph events; the poll interval is only the fallback). When it
+ disconnects, the previous sink becomes default again; rules are re-evaluated
+ on every graph change. If no rule matches, the active profile is left alone
+ (no surprising switches).
+diff --git a/docs/quickstart-fa.md b/docs/quickstart-fa.md
+new file mode 100644
+index 0000000..6259e56
+--- /dev/null
++++ b/docs/quickstart-fa.md
+@@ -0,0 +1,108 @@
++# EQForge — راه‌اندازی سریع (فارسی)
++
++این صفحه کوتاه‌ترین مسیر نصب و به‌روزرسانی EQForge روی لینوکس است. برای جزئیات
++کامل، [`installation.md`](installation.md) و [`cli.md`](cli.md) را ببینید.
++
++---
++
++## ۱. نصب یا به‌روزرسانی با یک اسکریپت
++
++یک اسکریپت، هم **نصب** است و هم **به‌روزرسانی**. لازم نیست بدانید نسخه‌ی قبلی
++نصب هست یا نه؛ خودش تشخیص می‌دهد:
++
++```sh
++curl -fsSL https://raw.githubusercontent.com/erfanjaster/eqforge/main/scripts/eqforge-update.sh | bash
++```
++
++یا اگر فایل اسکریپت را در اختیار دارید:
++
++```sh
++bash eqforge-update.sh
++```
++
++پیش‌نیازها فقط این‌ها هستند (روی اکثر توزیع‌ها از قبل نصب‌اند):
++
++```sh
++# Debian / Ubuntu
++sudo apt install python3 python3-venv build-essential git curl \
++                 pipewire pipewire-audio wireplumber \
++                 libpipewire-0.3-dev libspa-0.2-dev libjack-jackd2-dev python3-numpy
++
++# Arch
++sudo pacman -S base-devel python git curl pipewire pipewire-alsa pipewire-jack wireplumber
++
++# Fedora
++sudo dnf install python3 gcc make git curl pipewire pipewire-jack-audio-connection-kit wireplumber pipewire-devel
++```
++
++اسکریپت بدون `sudo` همه‌چیز را در `~/.local` نصب می‌کند.
++
++| وضعیت سیستم | کاری که اسکریپت می‌کند |
++|---|---|
++| هیچ نسخه‌ای نصب نیست | نصب کامل: هسته‌ی C، هاست بلادرنگ، ماژول PipeWire، بستهٔ پایتون |
++| نسخهٔ قدیمی نصب است | به‌روزرسانی در همان محل؛ نسخهٔ قبلی برای بازگشت نگه داشته می‌شود |
++| همان نسخه نصب است | «already up to date» و هیچ تغییری نمی‌دهد |
++| نصب دستی قبلی (pip یا checkout) | نسخهٔ مدیریت‌شدهٔ خودش را نصب می‌کند و می‌گوید نسخهٔ قبلی را چطور پاک کنید |
++
++### گزینه‌های پرکاربرد
++
++```sh
++bash eqforge-update.sh --check        # فقط بگو نسخهٔ نصب‌شده و آخرین نسخه چیست
++bash eqforge-update.sh --dry-run      # فقط برنامه را نشان بده، چیزی را تغییر نده
++bash eqforge-update.sh --ref v1.1.0   # نصب یک نسخهٔ مشخص
++bash eqforge-update.sh --channel main # آخرین تغییرات شاخهٔ main
++bash eqforge-update.sh --rollback     # برگشت به نسخهٔ قبلی
++bash eqforge-update.sh --uninstall    # حذف نصب (پروفایل‌ها می‌مانند)
++bash eqforge-update.sh --uninstall --purge   # حذف کامل همراه با تنظیمات
++```
++
++---
++
++## ۲. راه‌اندازی پردازش صدای سیستم (یک بار برای همیشه)
++
++```sh
++eqforge system autostart on        # اجرا در زمان ورود به سیستم (systemd --user)
++eqforge system start --manage      # هاست بلادرنگ + اتصال به خروجی پیش‌فرض
++eqforge set-profile music          # انتخاب پروفایل
++eqforge status                     # وضعیت کامل
++eqforge gui                        # رابط گرافیکی در مرورگر
++```
++
++## ۳. حذف تأخیر شروع صدا (EQ فقط بعد از یک ثانیه اعمال می‌شد)
++
++اگر هنگام پخش، «اولین ثانیه» بدون اکولایزر می‌ماند و بعد افکت‌ها اضافه می‌شوند،
++این یک مشکل زمان‌بندی مسیریابی است، نه باگ موتور صدا:
++
++```sh
++eqforge system always-on on --now   # استریم‌ها از همان اولین نمونه از EQForge رد می‌شوند
++eqforge status                      # خط "graph events": events یعنی واکنش میلی‌ثانیه‌ای
++```
++
++سه لایه‌ای که این مشکل را می‌بندند:
++
++1. **رویدادهای PipeWire** به‌جای نظرسنجی هر ۲ ثانیه → واکنش در حدود **۳۰ تا ۶۰ میلی‌ثانیه**.
++2. **قانون مسیریابی WirePlumber** (دستور `always-on`) → استریم از **نمونهٔ صفرم**
++   پردازش می‌شود.
++3. **بارگذاری پیکربندی قبل از پخش صدا** در ماژول SPA و در `eqforge-rt` (تلاش
++   مجدد سریع اگر فایل پیکربندی هنوز ساخته نشده باشد).
++
++برای برگشت به حالت قبل:
++
++```sh
++eqforge system always-on off
++```
++
++---
++
++## ۴. اگر مشکلی بود
++
++```sh
++eqforge doctor                                   # خودآزمایی کامل
++eqforge status                                   # نسخه، پروفایل، هاست، رویدادها
++journalctl --user -u eqforge-rt -n 50            # لاگ هاست بلادرنگ
++journalctl --user -u eqforge-daemon -n 50        # لاگ دیمن
++pw-link | grep eqforge                           # اتصال‌های گراف صدا
++pw-dump | grep -i eqforge                        # نودهای EQForge
++```
++
++راهنمای کامل عیب‌یابی: [`troubleshooting.md`](troubleshooting.md)
+diff --git a/docs/troubleshooting.md b/docs/troubleshooting.md
+index df0d836..798f079 100644
+--- a/docs/troubleshooting.md
++++ b/docs/troubleshooting.md
+@@ -55,6 +55,25 @@ Common causes: module not in the SPA search path (must be under
+ passes audio through — check `active-dsp.json` exists: run any
+ `eqforge set-profile` to regenerate it).
+ 
++**The first second of playback is not equalized (then the EQ "snaps in")**
++That is a *routing timing* symptom, not an engine bug: the stream was linked
++to the default sink by WirePlumber, and EQForge re-routed it a moment later.
++Check which mechanism is active:
++
++```sh
++eqforge status                      # "graph events" line: events or polling only
++eqforge system always-on status      # is the routing rule installed and live?
++```
++
++Fixes, in increasing order of completeness:
++
++1. `eqforge system always-on on --now` - new streams are created on EQForge's
++   inputs, so the first sample is processed (WirePlumber >= 0.5).
++2. If `graph events` says "polling only", `pw-dump -m` is unavailable
++   (PipeWire < 0.3.56): upgrade PipeWire, or accept the ~2 s fallback.
++3. If the rt host was started before `active-dsp.json` existed, it now retries
++   its config ~5x/s; check `journalctl --user -u eqforge-rt | grep waiting`.
++
+ **Glitches / xruns under load**
+ `pw-top` shows per-node xrun counts. Remedies: raise the quantum
+ (`pw-metadata -n settings 0 default.clock.force-quantum 2048`), ensure the
+diff --git a/eqforge/cli/commands_system.py b/eqforge/cli/commands_system.py
+index 4b11398..fd28560 100644
+--- a/eqforge/cli/commands_system.py
++++ b/eqforge/cli/commands_system.py
+@@ -94,11 +94,39 @@ def cmd_status(args) -> int:
+                                f"@ {rt.get('sample_rate', '?')} Hz"),
+                 ("momentary", f"{rt.get('momentary_lufs', -70):.1f} LUFS"),
+             ]
++        # How the graph is followed. This is worth a line of its own: it is the
++        # difference between "the first ~50 ms of playback is unprocessed" and
++        # "the first second is".
++        watch = st.get("watch") or {}
++        if watch.get("running"):
++            rows.append(("graph events",
++                         out.green(f"events via {Path(watch['command'][0]).name}"
++                                   if watch.get("command") else "events")
++                         + out.dim(f" ({watch.get('events', 0)} events, "
++                                   f"{watch.get('restarts', 0)} restarts)")))
++        else:
++            rows.append(("graph events",
++                         out.dim("polling only")
++                         + (out.dim(f" ({watch['error']})")
++                            if watch.get("error") else "")))
+     from eqforge.system import pipewire as pw
+     rows.append(("pipewire", out.green("available") if pw.pipewire_available()
+                  else out.dim("not found")))
+     if pw.pipewire_available():
+         rows.append(("default sink", pw.default_sink() or "?"))
++        try:
++            from eqforge.system import always_on as ao
++            ao_state = ao.status()
++        except EQForgeError:
++            ao_state = None
++        if ao_state and ao_state["installed"]:
++            if ao_state["ok"]:
++                word = out.green(f"active → {ao_state['node']}")
++            elif not ao_state["node_present"]:
++                word = out.yellow(f"{ao_state['node']} not in graph")
++            else:
++                word = out.yellow("installed, target missing")
++            rows.append(("always-on", word))
+     out.echo(out.kv_table(rows, indent="\n  "))
+     out.echo()
+     return 0
+@@ -368,6 +396,9 @@ def cmd_system(args) -> int:
+     if action == "autostart":
+         return cmd_autostart(args)
+ 
++    if action == "always-on":
++        return cmd_always_on(args)
++
+     raise EQForgeError(f"unknown system action {action!r}")
+ 
+ 
+@@ -493,6 +524,99 @@ def _set_auto_wire_config(value: bool) -> None:
+     store.save_config(cfg)
+ 
+ 
++def cmd_always_on(args) -> int:
++    """`eqforge system always-on on|off|status`.
++
++    Routing policy, not routing repair: this installs a WirePlumber rule that
++    points *new* playback streams at EQForge, so they are processed from their
++    first sample instead of being rewritten into the processor a moment later
++    (which is audible as "the first second has no EQ").
++    """
++    from eqforge.system import always_on as ao
++
++    mode = str(getattr(args, "autostart_action", None) or "status").lower()
++    node = getattr(args, "node", None)
++    as_json = bool(getattr(args, "json", False))
++
++    if mode == "on":
++        try:
++            report = ao.enable(node, restart=bool(getattr(args, "now", False)),
++                               force=bool(getattr(args, "force", False)))
++        except EQForgeError as e:
++            if as_json:
++                out.echo_json({"ok": False, "error": e.message,
++                               "hint": e.hint or ""})
++            else:
++                out.echo(out.yellow(f"  ! {e.message}"))
++                if e.hint:
++                    out.echo(out.dim(f"    {e.hint}"))
++            return 1
++        if as_json:
++            out.echo_json(dict(report, ok=True))
++            return 0
++        word = {"created": out.green("created"),
++                "same": out.dim("unchanged"),
++                "updated": out.yellow("updated")}.get(report["status"],
++                                                      report["status"])
++        out.echo(f"  {out.green('✓')} always-on routing: streams → "
++                 f"{out.cyan(report['node'])}")
++        out.echo(f"    {word}  {report['file']}")
++        if report.get("backup"):
++            out.echo(out.dim(f"    previous version saved as {report['backup']}"))
++        if report["restarted"]:
++            out.echo(f"    {out.green('✓')} wireplumber restarted")
++        else:
++            out.echo(out.dim("    apply it with: systemctl --user restart "
++                             "wireplumber"))
++        out.echo(out.dim("""
++  What this changes: new application streams are created on EQForge's inputs,
++  so the very first sample is processed instead of the first ~50 ms being
++  rewired by the daemon (or up to 2 s with polling). The daemon still watches
++  the graph and will re-route anything the policy does not cover.
++"""))
++        return 0
++
++    if mode == "off":
++        res = ao.disable()
++        if as_json:
++            out.echo_json(res)
++            return 0
++        if res["removed"]:
++            out.echo(f"  {out.green('✓')} always-on rule removed "
++                     f"({res['file']})")
++            out.echo(out.dim("    apply it with: systemctl --user restart "
++                             "wireplumber"))
++            out.echo(out.dim("    (the daemon keeps re-routing streams, just "
++                             "not before their first sample)"))
++        else:
++            out.echo(out.dim("  always-on rule was not installed"))
++        return 0
++
++    st = ao.status()
++    if as_json:
++        out.echo_json(st)
++        return 0 if st["ok"] else 1
++    ver = st["wireplumber"]
++    rows = [
++        ("rule file", out.green(str(st["file"])) if st["installed"]
++         else out.dim("not installed")),
++        ("target node", out.cyan(st["node"] or "—")),
++        ("node in graph", out.green("yes") if st["node_present"]
++         else out.dim("no")),
++        ("wireplumber", ".".join(map(str, ver)) if ver else "unknown"),
++        ("node.rules", out.green("supported") if st["supported"]
++         else out.yellow("unsupported by this WirePlumber")),
++    ]
++    out.echo(out.kv_table(rows, indent="\n  "))
++    out.echo()
++    if st["installed"] and not st["node_present"]:
++        out.echo(out.yellow(
++            "  ! the rule targets a node that is not in the graph right now: "
++            "start processing\n    (`eqforge system start`) or re-run "
++            "`eqforge system always-on on`"))
++    return 0 if st["ok"] else 1
++
++
+ def cmd_autostart(args) -> int:
+     """Install or remove the systemd user units that start EQForge at login.
+ 
+diff --git a/eqforge/cli/main.py b/eqforge/cli/main.py
+index 074ebe5..d886bc8 100644
+--- a/eqforge/cli/main.py
++++ b/eqforge/cli/main.py
+@@ -13,6 +13,7 @@ Usage overview (see docs/cli.md for the full manual):
+   eqforge daemon start|stop|restart|status|run [--auto-wire] [--manage-rt]
+   eqforge gui
+   eqforge system setup|start|stop|status|wire|autostart on|off|status
++  eqforge system always-on on|off|status
+   eqforge doctor [--build-core] | synth SIG OUT | version
+ """
+ from __future__ import annotations
+@@ -205,10 +206,20 @@ def build_parser() -> argparse.ArgumentParser:
+ 
+     sp = add_parser("system", help="system-wide processing (rt host)")
+     sp.add_argument("action", choices=("setup", "start", "stop", "status",
+-                                       "wire", "autostart"))
++                                       "wire", "autostart", "always-on"))
+     sp.add_argument("autostart_action", nargs="?",
+                     choices=("on", "off", "status"), default="status",
+-                    help="for `system autostart`")
++                    help="for `system autostart` and `system always-on`")
++    sp.add_argument("--node", help="with `system always-on`: PipeWire node "
++                                   "name application streams are routed to "
++                                   "(default: auto-detect eqforge_filter, "
++                                   "then eqforge)")
++    sp.add_argument("--now", action="store_true",
++                    help="with `system always-on on|off`: restart WirePlumber "
++                         "so the change applies immediately")
++    sp.add_argument("--force", action="store_true",
++                    help="with `system always-on on`: write the rule even on "
++                         "a WirePlumber version that may ignore it")
+     sp.add_argument("--rt-binary", help="path to eqforge-rt")
+     sp.add_argument("--channels", type=int)
+     sp.add_argument("--manage", action="store_true",
+diff --git a/eqforge/daemon/server.py b/eqforge/daemon/server.py
+index beb69a6..03b6e4f 100644
+--- a/eqforge/daemon/server.py
++++ b/eqforge/daemon/server.py
+@@ -3,10 +3,12 @@
+ Single process, three threads:
+   - RPC loop on $XDG_RUNTIME_DIR/eqforge/daemon.sock (line-delimited JSON)
+   - HTTP server on 127.0.0.1 (GUI assets, /api/* REST, /api/events SSE)
+-  - device watcher: polls the PipeWire graph (~2 s) and applies matching
+-    rules when auto-switch is enabled; emits SSE events on changes. With
+-    `auto_wire` it also re-links any stream that stopped passing through
+-    the rt host, and with `manage_rt` it keeps that host alive.
++  - device watcher: follows the PipeWire graph - driven by registry events
++    (`pw-dump -m`, reaction in tens of ms) with a ~2 s poll as the safety
++    net - and applies matching rules when auto-switch is enabled; emits SSE
++    events on changes. With `auto_wire` it also re-links any stream that
++    stopped passing through the rt host, and with `manage_rt` it keeps that
++    host alive.
+ 
+ Why the watcher owns re-wiring: PipeWire destroys a stream node when a
+ player stops and creates a fresh one when it starts, which WirePlumber
+@@ -84,6 +86,9 @@ class Daemon:
+     _rt_stop_requested = False
+     _wire_sig: str | None = None
+     _wire_ok = False
++    _watch = None
++    _graph_wake = None
++    graph_events = 0
+ 
+     def __init__(self, auto_wire: bool | None = None, manage_rt: bool = False,
+                  rt_channels: int = 2, tick: float = 2.0,
+@@ -101,6 +106,15 @@ class Daemon:
+         self._rt_stop_requested = False
+         self._wire_sig: str | None = None
+         self._wire_ok = False
++        # Event-driven reaction to the PipeWire graph. The polling tick stays
++        # as the safety net (it also covers default-sink metadata changes and
++        # a monitor that died), but a stream appearing must not wait 2 s:
++        # `watch.GraphWatcher` wakes the loop the moment PipeWire reports the
++        # new node, which is what turns "the first second is unprocessed"
++        # into "the first ~50 ms is".
++        self._graph_wake = threading.Event()
++        self._watch = None
++        self.graph_events = 0
+         # `auto_wire=None` means "whatever config.json says", so a daemon
+         # started by hand behaves like the one systemd starts. It is off
+         # unless asked for: the daemon is spawned implicitly by ordinary
+@@ -158,6 +172,16 @@ class Daemon:
+             # EngineState, so they are added here.
+             s["auto_wire"] = self.auto_wire
+             s["manage_rt"] = self.manage_rt
++            # How the daemon learns about graph changes: event-driven (ms) or
++            # polled (s). Reported so `eqforge status` can tell the user which
++            # one they are getting - it is the difference between "the first
++            # ~50 ms is unprocessed" and "the first second is".
++            watch = self._watch
++            s["watch"] = (watch.stats() if watch is not None else
++                          {"running": False, "event_capable": False,
++                           "events": self.graph_events,
++                           "raw_events": 0, "restarts": 0, "command": [],
++                           "error": None})
+             return s
+ 
+         if method == "set_profile":
+@@ -372,7 +396,59 @@ class Daemon:
+                         self._auto_wire(view)
+             except Exception:  # noqa: BLE001 - watcher must never die
+                 log.debug("watcher error:\n%s", traceback.format_exc())
++            self._wait_for_work()
++
++    def _wait_for_work(self) -> None:
++        """Sleep until the next tick *or* a graph event, whichever is first.
++
++        The tick is the safety net: it still catches default-sink metadata
++        changes, a monitor process that died, and events that raced a pass.
++        A graph event wakes the loop immediately, so a player that starts a
++        new stream is routed through the processor in tens of milliseconds
++        instead of up to `tick` seconds.
++        """
++        wake = self._graph_wake
++        if wake is None:                      # constructed without run_forever
+             self.stop_event.wait(self.tick)
++            return
++        # Wait for either a graph event or the tick, in short slices so that a
++        # plain `stop_event.set()` (tests, or a shutdown that does not go
++        # through stop()) still ends the loop promptly.
++        deadline = time.monotonic() + self.tick
++        while not self.stop_event.is_set():
++            left = deadline - time.monotonic()
++            if left <= 0:
++                return
++            if wake.wait(min(left, 0.2)):
++                wake.clear()
++                return
++
++    # ---------------- event-driven graph watching ----------------
++    def _start_graph_watch(self) -> None:
++        """Subscribe to PipeWire registry events (best effort)."""
++        if self._watch is not None:
++            return
++        from eqforge.system.watch import GraphWatcher
++        watch = GraphWatcher(self._on_graph_event)
++        if watch.start():
++            self._watch = watch
++            log.info("graph events: watching via %s", " ".join(watch.stats()["command"]))
++        else:
++            self._watch = None
++            log.info("graph events unavailable; falling back to %.1fs polling",
++                     self.tick)
++
++    def _on_graph_event(self, reason: str = "graph") -> None:
++        """Called from the watcher thread; must stay trivial."""
++        self.graph_events += 1
++        wake = self._graph_wake
++        if wake is not None:
++            wake.set()
++
++    def _stop_graph_watch(self) -> None:
++        watch, self._watch = self._watch, None
++        if watch is not None:
++            watch.stop()
+ 
+     # ---------------- rt host supervision (optional) ----------------
+     def _ensure_rt_host(self) -> None:
+@@ -523,6 +599,12 @@ class Daemon:
+ 
+     def stop(self) -> None:
+         self.stop_event.set()
++        # Wake the watcher loop out of its `_wait_for_work()` sleep so shutdown
++        # is immediate instead of up to one poll interval late.
++        wake = self._graph_wake
++        if wake is not None:
++            wake.set()
++        self._stop_graph_watch()
+         # Only tear down an rt host this daemon launched; one owned by
+         # systemd (or started by hand) must survive the daemon.
+         if self._rt_proc is not None:
+@@ -548,6 +630,7 @@ class Daemon:
+         sock_path = paths.daemon_socket()
+         if sock_path.exists() and self._socket_alive(sock_path):
+             raise RuntimeError("daemon already running")
++        self._start_graph_watch()
+         threading.Thread(target=self.watcher_loop, daemon=True).start()
+         if http:
+             self.serve_http(port=port)
+diff --git a/eqforge/system/always_on.py b/eqforge/system/always_on.py
+new file mode 100644
+index 0000000..c0d1a8e
+--- /dev/null
++++ b/eqforge/system/always_on.py
+@@ -0,0 +1,223 @@
++"""Always-on routing: EQForge in the audio path *before* audio starts.
++
++The problem this solves
++-----------------------
++In both deployments EQForge sits between an application and the speakers, and
++the interesting question is *when* it gets into the path:
++
++* **rt host** - applications are linked to the sink by WirePlumber the moment
++  their stream node appears. Routing them through `eqforge-rt` is a rewrite
++  of that decision, so it always happens *after* the first samples have
++  already gone straight to the sink. The daemon minimises that window
++  (registry events instead of a 2 s poll, see `eqforge.system.watch`), but
++  it cannot make it zero: something has to react.
++* **SPA filter node** - the node itself is resident from login, so a stream
++  can be linked into it from its first sample. Zero by construction.
++
++`always-on` therefore does the one thing a daemon cannot: it tells
++WirePlumber, in WirePlumber's own policy language, that new playback streams
++belong to EQForge. The stream is then *created* on EQForge's inputs - there is
++no moment in which the first second of programme material takes a shortcut
++around the processor.
++
++    app stream created  ->  WirePlumber links it to eqforge  ->  sink
++
++The daemon keeps its rewiring pass as a safety net (a rule can be shadowed by
++another policy drop-in, and hot-plug redeployments happen), so the two
++mechanisms layer: policy for "from the first sample", events for "whenever
++reality disagrees with policy".
++
++Scope and safety
++----------------
++* Only `Stream/Output/Audio` is matched. Microphones, MIDI, camera audio and
++  other people's filter nodes are untouched.
++* The target node must exist in the live graph before the rule is written -
++  a rule pointing at a name nobody owns is how a user ends up with silent
++  applications. `--node` overrides the auto-detected name.
++* `off` removes the drop-in and restarts WirePlumber; the daemon's rewiring
++  keeps working exactly as before, so nothing is lost but the zero-gap
++  behaviour.
++* WirePlumber >= 0.5 uses `node.rules` in a `.conf` drop-in. 0.4 needs the
++  Lua scripting API (`packaging/wireplumber/50-eqforge.lua.example`, shipped
++  with the repo); this module refuses on 0.4 instead of writing a file that
++  the session would ignore.
++"""
++from __future__ import annotations
++
++import os
++import re
++import subprocess
++from pathlib import Path
++
++from eqforge.errors import SystemError
++from eqforge.log import get_logger
++from eqforge.system import module_config as mc
++from eqforge.system import pipewire as pw
++
++log = get_logger("system.always_on")
++
++#: Node names, in the order they are preferred. `eqforge_filter` is the SPA
++#: filter node (module deployment); `eqforge` is the rt host's JACK client.
++DEFAULT_CANDIDATES = ("eqforge_filter", "eqforge")
++
++RULE_TEMPLATE = """\
++# EQForge always-on routing (generated by `eqforge system always-on on`).
++#
++# Every new application playback stream is created on EQForge's inputs instead
++# of the default sink, so it is processed from its very first sample - there is
++# no window in which the onset of playback bypasses the equalizer.
++#
++# Remove with `eqforge system always-on off` (or delete this file and
++# `systemctl --user restart wireplumber`). `eqforge system always-on status`
++# shows what is active.
++
++node.rules = [
++    {
++        matches = [
++            { media.class = "Stream/Output/Audio" }
++        ]
++        actions = {
++            update-props = {
++                target.object = "%(node)s"
++            }
++        }
++    }
++]
++"""
++
++
++def rule_file(home: Path | str | None = None) -> Path:
++    """Where the generated WirePlumber drop-in lives."""
++    base = Path(home) if home is not None else Path(os.path.expanduser("~"))
++    return (base / ".config/wireplumber/wireplumber.conf.d"
++            / "60-eqforge-streams.conf")
++
++
++def render_rule(node: str) -> str:
++    return RULE_TEMPLATE % {"node": node}
++
++
++def wireplumber_version() -> tuple[int, int] | None:
++    """Best-effort (major, minor) of the running WirePlumber, or None."""
++    for cmd in (["wireplumber", "--version"], ["wpctl", "--version"]):
++        try:
++            r = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
++        except (OSError, subprocess.TimeoutExpired):
++            continue
++        m = re.search(r"(\d+)\.(\d+)", (r.stdout or "") + (r.stderr or ""))
++        if m:
++            return int(m.group(1)), int(m.group(2))
++    return None
++
++
++def _supports_node_rules() -> bool:
++    """WirePlumber >= 0.5 reads `node.rules` from a `.conf` drop-in."""
++    ver = wireplumber_version()
++    if ver is None:
++        return True                 # unknown: assume modern, the rule is inert
++    return ver >= (0, 5)
++
++
++def detect_node() -> str | None:
++    """The EQForge node actually present in the graph, if any."""
++    if not pw.pipewire_available():
++        return None
++    try:
++        view = pw.snapshot()
++    except SystemError:
++        return None
++    for name in DEFAULT_CANDIDATES:
++        if view.node_id(name) is not None:
++            return name
++    return None
++
++
++def configured_node(path: Path | None = None) -> str | None:
++    """The node name written into the drop-in, if it is installed."""
++    p = path or rule_file()
++    if not p.exists():
++        return None
++    m = re.search(r'target\.object\s*=\s*"([^"]+)"', p.read_text(errors="replace"))
++    return m.group(1) if m else None
++
++
++def _restart_wireplumber() -> tuple[bool, str]:
++    try:
++        r = subprocess.run(["systemctl", "--user", "restart", "wireplumber"],
++                           capture_output=True, text=True, timeout=20)
++    except (OSError, subprocess.TimeoutExpired) as e:
++        return False, str(e)
++    return r.returncode == 0, (r.stderr or r.stdout or "").strip()[:200]
++
++
++def enable(node: str | None = None, *, restart: bool = False,
++           force: bool = False) -> dict:
++    """Install the always-on routing rule.
++
++    Returns a report dict; raises SystemError when the rule cannot be written
++    safely (no node to target, or a WirePlumber that would ignore it).
++    """
++    if not _supports_node_rules() and not force:
++        ver = wireplumber_version()
++        raise SystemError(
++            "WirePlumber %s does not read node.rules from a .conf drop-in" %
++            (".".join(map(str, ver)) if ver else "(unknown version)"),
++            hint="use the Lua policy in packaging/wireplumber/"
++                 "50-eqforge.lua.example, or pass --force if your "
++                 "WirePlumber does support node.rules")
++
++    target = node or detect_node()
++    if not target:
++        raise SystemError(
++            "no EQForge node in the audio graph to route streams to",
++            hint="start processing first (`eqforge system start`, or enable "
++                 "the SPA filter node), then re-run "
++                 "`eqforge system always-on on`; `eqforge devices` shows "
++                 "what the graph contains")
++    if node and pw.pipewire_available():
++        try:
++            seen = pw.snapshot().node_id(node) is not None
++        except SystemError:
++            seen = True                        # cannot check; trust the user
++        if not seen:
++            raise SystemError(
++                f"node {node!r} is not in the audio graph",
++                hint="`eqforge devices` lists the nodes PipeWire knows about")
++
++    path = rule_file()
++    status, backup = mc.write_managed(path, render_rule(target))
++    report = {"node": target, "file": str(path), "status": status,
++              "backup": str(backup) if backup else None, "restarted": False,
++              "error": None}
++    if restart:
++        ok, err = _restart_wireplumber()
++        report["restarted"] = ok
++        report["error"] = None if ok else err
++    return report
++
++
++def disable() -> dict:
++    """Remove the always-on rule (the daemon's rewiring keeps working)."""
++    path = rule_file()
++    existed = path.exists()
++    if existed:
++        path.unlink()
++    return {"file": str(path), "removed": existed}
++
++
++def status(node: str | None = None) -> dict:
++    """What `always-on` currently does, without changing anything."""
++    path = rule_file()
++    installed = path.exists()
++    wanted = configured_node(path) if installed else None
++    live = detect_node()
++    return {
++        "file": str(path),
++        "installed": installed,
++        "node": wanted,
++        "node_present": bool(live and wanted and live == wanted),
++        "live_node": live,
++        "wireplumber": wireplumber_version(),
++        "supported": _supports_node_rules(),
++        "ok": bool(installed and wanted and live == wanted),
++    }
+diff --git a/eqforge/system/watch.py b/eqforge/system/watch.py
+new file mode 100644
+index 0000000..6dab040
+--- /dev/null
++++ b/eqforge/system/watch.py
+@@ -0,0 +1,252 @@
++"""Event-driven PipeWire graph watching.
++
++Why this exists
++---------------
++The daemon used to learn about the audio graph only on its polling tick (2 s).
++For device auto-switching that is fine - nobody notices a profile change a
++second late. For *routing* it is not: PipeWire destroys an application's
++stream node the moment it pauses, and creates a brand-new node when playback
++starts again, which WirePlumber links straight to the default sink. The
++daemon then had to notice, and move that stream through the processor - up to
++two seconds later. The audible result is exactly the reported symptom:
++
++    press play -> the first ~1 s is unprocessed, then the EQ "snaps in".
++
++`pw-dump --monitor` (`-m`) streams the same registry events WirePlumber acts
++on, as JSON, the instant they happen. Reacting to those turns a 2000 ms
++reaction into a ~30-60 ms one (debounce + one `pw-dump` snapshot + a couple
++of `pw-link` calls).
++
++Design notes
++------------
++* One background thread per watcher, one child process (`pw-dump -m`).
++* Events are *coalesced*: a single stream start generates a burst of node,
++  port and link events. Reacting to each one would run several rewiring
++  passes for one playback start; instead the first event starts a short
++  debounce window and the callback runs once per burst.
++* The callback runs on the watcher thread and must be cheap and must never
++  raise. Exceptions are logged and swallowed: a watcher that dies because a
++  single pass failed is worse than a slow one.
++* If `pw-dump -m` is unavailable (PipeWire < 0.3.56, or a tool that refuses
++  the flag) the watcher reports `event_capable == False` after giving up, and
++  the daemon keeps its polling tick as the only mechanism. Nothing breaks.
++* `EQFORGE_MONITOR_CMD` overrides the monitor command; the test suite uses
++  it to run a fake monitor instead of a real PipeWire session.
++"""
++from __future__ import annotations
++
++import os
++import select
++import shlex
++import shutil
++import subprocess
++import threading
++import time
++
++from eqforge.log import get_logger
++
++log = get_logger("system.watch")
++
++#: Object types worth reacting to. Nodes and links are what routing cares
++#: about; clients and metadata do not move audio, and reacting to them would
++#: just cost snapshots. The markers are the `type` strings pw-dump emits.
++RELEVANT_MARKERS = (
++    b"PipeWire:Interface:Node",
++    b"PipeWire:Interface:Link",
++)
++
++#: How long to wait after the first event of a burst before acting, so that a
++#: stream's node + ports + links are all in the graph when we look.
++DEFAULT_DEBOUNCE = 0.025
++
++#: Give the monitor this long to prove it works before declaring it dead.
++STARTUP_GRACE = 1.5
++
++
++def monitor_command() -> list[str]:
++    """The command that streams graph events (overridable for tests)."""
++    override = os.environ.get("EQFORGE_MONITOR_CMD")
++    if override:
++        return shlex.split(override)
++    return ["pw-dump", "-m"]
++
++
++def available() -> bool:
++    """True when a monitor could plausibly run in this session."""
++    cmd = monitor_command()
++    return bool(cmd) and shutil.which(cmd[0]) is not None
++
++
++class GraphWatcher:
++    """Push-style PipeWire graph notifications.
++
++    >>> w = GraphWatcher(lambda reason: print(reason))
++    >>> w.start()
++    >>> ...
++    >>> w.stop()
++
++    `on_change` receives a short reason string ("graph"). It is called from
++    the watcher thread, at most once per debounce window.
++    """
++
++    def __init__(self, on_change, *, debounce: float = DEFAULT_DEBOUNCE,
++                 cmd: list[str] | None = None, max_restarts: int = 5,
++                 restart_backoff: float = 1.0):
++        self._on_change = on_change
++        self._debounce = max(0.001, float(debounce))
++        self._cmd = list(cmd) if cmd else monitor_command()
++        self._max_restarts = int(max_restarts)
++        self._restart_backoff = float(restart_backoff)
++
++        self._thread: threading.Thread | None = None
++        self._stop = threading.Event()
++        self._proc: subprocess.Popen | None = None
++        self._lock = threading.Lock()
++
++        self.events = 0            # bursts delivered
++        self.raw_events = 0        # individual event chunks seen
++        self.restarts = 0
++        self.event_capable = available()
++        self.last_error: str | None = None
++
++    # ---------------------------------------------------------------- state
++    @property
++    def running(self) -> bool:
++        return self._thread is not None and self._thread.is_alive()
++
++    def start(self) -> bool:
++        """Start watching. False when no monitor tool is installed."""
++        if self.running:
++            return True
++        if not self._cmd or shutil.which(self._cmd[0]) is None:
++            self.event_capable = False
++            return False
++        self._stop.clear()
++        self._thread = threading.Thread(target=self._run, name="eqforge-watch",
++                                        daemon=True)
++        self._thread.start()
++        return True
++
++    def stop(self) -> None:
++        self._stop.set()
++        with self._lock:
++            proc = self._proc
++        if proc is not None:
++            try:
++                proc.terminate()
++            except OSError:
++                pass
++        if self._thread is not None:
++            self._thread.join(timeout=2.0)
++            self._thread = None
++
++    # --------------------------------------------------------------- worker
++    def _run(self) -> None:
++        first = True
++        while not self._stop.is_set():
++            if not self._spawn(first):
++                break
++            first = False
++            if self._stop.is_set():
++                break
++            if self.restarts >= self._max_restarts:
++                log.warning("graph watcher: giving up after %d restarts",
++                            self.restarts)
++                self.event_capable = False
++                break
++            self.restarts += 1
++            self._stop.wait(self._restart_backoff)
++        self._close_proc()
++
++    def _spawn(self, first: bool) -> bool:
++        started = time.monotonic()
++        try:
++            proc = subprocess.Popen(self._cmd, stdout=subprocess.PIPE,
++                                    stderr=subprocess.DEVNULL, bufsize=0)
++        except OSError as e:                      # pragma: no cover - env
++            self.last_error = str(e)
++            log.warning("graph watcher: cannot run %s (%s)", self._cmd[0], e)
++            self.event_capable = False
++            return False
++        with self._lock:
++            self._proc = proc
++        seen_output = False
++        pending = False            # an event arrived, not yet delivered
++        deadline = 0.0
++
++        while not self._stop.is_set():
++            fd = proc.stdout.fileno() if proc.stdout else -1
++            timeout = 0.2
++            if pending:
++                timeout = max(0.0, min(timeout, deadline - time.monotonic()))
++            try:
++                ready, _, _ = select.select([fd], [], [], timeout) if fd >= 0 \
++                    else ([], [], [])
++            except (OSError, ValueError):         # pragma: no cover - env
++                break
++            if not ready:
++                if proc.poll() is not None:
++                    break
++                if pending and time.monotonic() >= deadline:
++                    self._deliver()
++                    pending = False
++                continue
++            try:
++                chunk = os.read(fd, 65536)
++            except OSError:                       # pragma: no cover - env
++                break
++            if not chunk:
++                break
++            seen_output = True
++            if any(m in chunk for m in RELEVANT_MARKERS):
++                self.raw_events += 1
++                if not pending:
++                    pending = True
++                    deadline = time.monotonic() + self._debounce
++        rc = proc.poll()
++        self._close_proc()
++        if not seen_output and (time.monotonic() - started) < STARTUP_GRACE \
++                and rc not in (None, 0, -15):
++            # The tool exists but refused to monitor (old PipeWire, or a
++            # different `pw-dump`): stop trying, keep polling.
++            self.last_error = f"{self._cmd[0]} -m exited {rc}"
++            log.info("graph watcher: %s; falling back to polling",
++                     self.last_error)
++            self.event_capable = False
++            return False
++        return not self._stop.is_set()
++
++    def _deliver(self) -> None:
++        self.events += 1
++        try:
++            self._on_change("graph")
++        except Exception:                          # noqa: BLE001 - never die
++            log.debug("graph watcher callback failed", exc_info=True)
++
++    def _close_proc(self) -> None:
++        with self._lock:
++            proc, self._proc = self._proc, None
++        if proc is None:
++            return
++        try:
++            if proc.poll() is None:
++                proc.terminate()
++                try:
++                    proc.wait(timeout=1.0)
++                except subprocess.TimeoutExpired:  # pragma: no cover
++                    proc.kill()
++        except OSError:                             # pragma: no cover
++            pass
++        finally:
++            if proc.stdout is not None:
++                try:
++                    proc.stdout.close()
++                except OSError:                     # pragma: no cover
++                    pass
++
++    # ---------------------------------------------------------------- stats
++    def stats(self) -> dict:
++        return {"running": self.running, "event_capable": self.event_capable,
++                "events": self.events, "raw_events": self.raw_events,
++                "restarts": self.restarts, "command": self._cmd,
++                "error": self.last_error}
+diff --git a/eqforge/version.py b/eqforge/version.py
+index bc38232..278d06f 100644
+--- a/eqforge/version.py
++++ b/eqforge/version.py
+@@ -1,6 +1,6 @@
+ """Version information. Keep in sync with core/include/eqforge/version.h."""
+ 
+-__version__ = "1.0.0"
++__version__ = "1.1.0"
+ ABI_VERSION = 1
+ 
+ # Profile format version handled by this release.
+diff --git a/packaging/install.sh b/packaging/install.sh
+index a26836e..6e678c4 100644
+--- a/packaging/install.sh
++++ b/packaging/install.sh
+@@ -5,6 +5,13 @@
+ #   ./packaging/install.sh --system   install native parts under /usr (needs root)
+ #
+ # Idempotent; safe to re-run after updates.
++#
++# NOTE: for installs from outside a checkout - and for anything a user should
++# be able to run on an existing machine to get to the newest version - use
++# `scripts/eqforge-update.sh`, which fetches from GitHub, handles a private
++# venv, backs up the previous version, refreshes the login units and supports
++# --check / --rollback / --uninstall. This script only builds what is already
++# in the working tree.
+ 
+ set -euo pipefail
+ 
+diff --git a/pipewire/module-eqforge.c b/pipewire/module-eqforge.c
+index 0f8da74..c11a542 100644
+--- a/pipewire/module-eqforge.c
++++ b/pipewire/module-eqforge.c
+@@ -232,7 +232,18 @@ static void *config_watcher(void *arg)
+ {
+     struct impl *this = (struct impl *)arg;
+     while (atomic_load(&this->watcher_run)) {
+-        struct timespec ts = { .tv_sec = 0, .tv_nsec = 500000000 };
++        /* Two speeds, because the two cases are not equally audible:
++         *  - no live chain yet (the config file did not exist when the node
++         *    was created, e.g. the daemon publishes active-dsp.json after
++         *    PipeWire starts): everything is passed through unprocessed right
++         *    now, so look for the file 10x per second;
++         *  - a chain is live and only a *change* is pending: half a second of
++         *    extra latency before a profile edit takes effect is inaudible and
++         *    keeps the stat() traffic negligible. */
++        bool unconfigured = atomic_load(&this->chain) == NULL;
++        struct timespec ts = { .tv_sec = 0,
++                               .tv_nsec = unconfigured ? 100000000L
++                                                       : 500000000L };
+         nanosleep(&ts, NULL);
+         impl_collect_retired(this);
+         if (atomic_load(&this->swap_requested))
+@@ -967,6 +978,15 @@ static int impl_process(void *object)
+     impl_apply_pending_swap(this);
+     eqf_chain *chain = atomic_load_explicit(&this->chain, memory_order_acquire);
+ 
++    /* A chain is built at node creation (see impl_factory_init) so that the
++     * very first sample is processed. Until a format is negotiated it is built
++     * for the default layout, so guard the hand-off: running a chain whose
++     * channel count disagrees with the buffers would silently drop channels
++     * (or write past them). Pass through until configure_format() has staged
++     * the correctly sized chain. */
++    if (chain && eqf_chain_channels(chain) != this->channels)
++        chain = NULL;
++
+     /* Propagate a props-driven mute onto the live chain. eqf_chain_set_bypass()
+      * starts a crossfade, so it must only be called on an edge - calling it
+      * every cycle would restart the fade forever and silence the node. */
+@@ -1112,6 +1132,19 @@ static int impl_factory_init(const struct spa_handle_factory *factory,
+ 
+     atomic_store(&this->cfg_channels, this->channels);
+     atomic_store(&this->cfg_rate, this->rate);
++    /* Build the chain *here*, on the control thread, before any format is
++     * negotiated - and therefore before the first sample can arrive.
++     *
++     * The previous order (let the ~2 Hz config watcher pick the file up after
++     * negotiation) meant a freshly started node had no live chain for up to
++     * half a second, and process() correctly passes audio through when there
++     * is no chain. PipeWire happily feeds it audio in that window, so the
++     * first fraction of a second of every playback after login came out
++     * unprocessed and then "snapped" into the equalizer. Loading eagerly
++     * costs one stat + parse at node creation and removes the window
++     * entirely; a format negotiation still rebuilds at the negotiated rate. */
++    if (impl_update_config(this, true))
++        impl_apply_pending_swap(this);      /* no data thread yet: safe here */
+     /* Start watching now: after the first format negotiation config_mtime is
+      * already current, so a watcher started later can only see subsequent
+      * changes - which is what we want, but the node may be created long before
+diff --git a/pyproject.toml b/pyproject.toml
+index ce608e8..c7fa33a 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
+ 
+ [project]
+ name = "eqforge"
+-version = "1.0.0"
++version = "1.1.0"
+ description = "EQForge - profile-driven smart audio processing for Linux (native C DSP core + PipeWire integration)"
+ readme = "README.md"
+ # Dual-licensed: GPLv3 for everyone, plus a commercial license for
+diff --git a/rthost/eqforge-rt.c b/rthost/eqforge-rt.c
+index da44937..8e9692e 100644
+--- a/rthost/eqforge-rt.c
++++ b/rthost/eqforge-rt.c
+@@ -39,6 +39,7 @@
+ #include <sys/socket.h>
+ #include <sys/stat.h>
+ #include <sys/un.h>
++#include <time.h>
+ #include <unistd.h>
+ 
+ #include "eqforge/eqforge.h"
+@@ -75,6 +76,18 @@ struct rt_state {
+     char socket_path[108];
+     int listen_fd;
+     pthread_t ctl_thread;
++
++    /* Initial config, kept so it can be retried.
++     *
++     * At login the host is started by systemd as soon as PipeWire is up,
++     * while the daemon that publishes active-dsp.json may still be starting.
++     * A failed first load used to leave the host running *unconfigured* -
++     * i.e. passing audio through untouched - until the daemon happened to
++     * push a reload, which is exactly the "the first second has no EQ"
++     * behaviour. Keeping the path lets the control thread retry until the
++     * file appears. Cleared once a chain is live. */
++    char initial_config[512];
++    unsigned config_retries;
+ };
+ 
+ static struct rt_state g_state;
+@@ -282,6 +295,12 @@ static void handle_command(struct rt_state *st, const char *line,
+             if (rate == 0)
+                 rate = jack_get_sample_rate(st->client);
+             int rc = build_and_publish(st, path, rate);
++            if (rc == EQF_OK) {
++                /* A live chain from an explicit reload supersedes the config
++                 * we were launched with: stop retrying it. */
++                st->initial_config[0] = '\0';
++                st->config_retries = 0;
++            }
+             pthread_mutex_unlock(&st->reload_lock);
+             if (rc == EQF_OK)
+                 reap_retired(st);
+@@ -391,6 +410,39 @@ static void *ctl_thread(void *arg)
+                             rate, eqf_result_str(rc));
+             }
+         }
++        /* Retry a config that was not there yet at start-up (see
++         * initial_config). Cheap: one stat/parse per second until it works. */
++        if (st->initial_config[0] &&
++            atomic_load_explicit(&st->chain, memory_order_acquire) == NULL) {
++            /* Every pass through this loop is one 200 ms poll timeout, so a
++             * missing config is retried ~5x/s: fast enough that the host is
++             * processing before a human can press play, slow enough that a
++             * config that never appears costs a few stat() calls. */
++            static struct timespec last_try;
++            struct timespec now;
++            clock_gettime(CLOCK_MONOTONIC, &now);
++            long since_ms = (now.tv_sec - last_try.tv_sec) * 1000L +
++                            (now.tv_nsec - last_try.tv_nsec) / 1000000L;
++            if (since_ms >= 200) {
++                last_try = now;
++                pthread_mutex_lock(&st->reload_lock);
++                uint32_t rate = atomic_load(&st->rate_wanted);
++                if (rate == 0)
++                    rate = jack_get_sample_rate(st->client);
++                int rc = build_and_publish(st, st->initial_config, rate);
++                pthread_mutex_unlock(&st->reload_lock);
++                if (rc == EQF_OK) {
++                    fprintf(stderr, "eqforge-rt: config '%s' loaded\n",
++                            st->initial_config);
++                    st->initial_config[0] = '\0';
++                    reap_retired(st);
++                } else if (st->config_retries++ % 150 == 0) {
++                    fprintf(stderr,
++                            "eqforge-rt: waiting for config '%s' (%s)\n",
++                            st->initial_config, eqf_result_str(rc));
++                }
++            }
++        }
+         struct pollfd pfd = { .fd = st->listen_fd, .events = POLLIN };
+         int pr = poll(&pfd, 1, 200);
+         if (pr <= 0)
+@@ -509,6 +561,9 @@ int main(int argc, char **argv)
+     {
+         uint32_t rate = jack_get_sample_rate(st->client);
+         atomic_store(&st->rate_wanted, rate);
++        if (config)
++            snprintf(st->initial_config, sizeof(st->initial_config), "%s",
++                     config);
+         int rc = build_and_publish(st, config, rate);
+         if (rc != EQF_OK && !config) {
+             /* No initial config is legitimate (pass-through), but a failure to
+diff --git a/scripts/eqforge-update.sh b/scripts/eqforge-update.sh
+new file mode 100755
+index 0000000..9724614
+--- /dev/null
++++ b/scripts/eqforge-update.sh
+@@ -0,0 +1,778 @@
++#!/usr/bin/env bash
++# EQForge installer + updater  (one script, both jobs)
++#
++#   curl -fsSL https://raw.githubusercontent.com/erfanjaster/eqforge/main/scripts/eqforge-update.sh | bash
++#
++#   ./scripts/eqforge-update.sh              # install if absent, update if present
++#   ./scripts/eqforge-update.sh --check      # only say what would happen
++#   ./scripts/eqforge-update.sh --ref v1.2.0 # install a specific tag/commit
++#   ./scripts/eqforge-update.sh --rollback   # go back to the previous version
++#
++# Why one script: there is no state a hand-written installer keeps that this
++# cannot rediscover. It looks at what is already on the machine (a managed
++# install of ours, a pip --user install, a git checkout), decides between
++# "fresh install" and "update", and does the same build in both cases.
++#
++# Layout it manages (all under $PREFIX, default ~/.local):
++#
++#   ~/.local/bin/eqforge              -> symlink into the venv
++#   ~/.local/bin/eqforge-rt           -> symlink to the native realtime host
++#   ~/.local/lib/eqforge/             libeqforge.so + headers
++#   ~/.local/libexec/eqforge/         eqforge-rt
++#   ~/.local/lib/spa-0.2/eqforge/     SPA filter module (module deployment)
++#   ~/.local/share/eqforge/venv/      python environment (system site pkgs on)
++#   ~/.local/share/eqforge/src/<ref>/ the source revision this build came from
++#   ~/.local/share/eqforge/install.json   what is installed (the state file)
++#   ~/.local/share/eqforge/backups/    native binaries of the previous version
++#
++# Notes
++#   * No sudo needed for the default (user) install. Root is only touched with
++#     --system, and even then only for the prefix.
++#   * Existing installs are never silently destroyed: the previous native
++#     binaries are backed up and the previous source revision is kept, which
++#     is what `--rollback` restores.
++#   * The script is safe to re-run. "Already up to date" is a successful,
++#     quiet, change-free outcome.
++#
++# SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-EQForge-Commercial
++set -euo pipefail
++
++SCRIPT_VERSION="1.1.0"
++REPO="${EQFORGE_REPO:-erfanjaster/eqforge}"
++GITHUB="https://github.com/${REPO}.git"
++CODELOAD="https://codeload.github.com/${REPO}/tar.gz"
++CHANNEL="${EQFORGE_CHANNEL:-stable}"        # stable = newest git tag, main = tip
++
++# ------------------------------------------------------------------ output --
++if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
++    C_OK=$'\033[32m'; C_WARN=$'\033[33m'; C_ERR=$'\033[31m'
++    C_DIM=$'\033[2m'; C_B=$'\033[1m'; C_OFF=$'\033[0m'
++else
++    C_OK=; C_WARN=; C_ERR=; C_DIM=; C_B=; C_OFF=
++fi
++
++say()  { printf '%s\n' "$*"; }
++step() { printf '\n%s==>%s %s\n' "$C_B" "$C_OFF" "$*"; }
++ok()   { printf '  %s✓%s %s\n' "$C_OK" "$C_OFF" "$*"; }
++warn() { printf '  %s!%s %s\n' "$C_WARN" "$C_OFF" "$*" >&2; }
++info() { printf '    %s\n' "$*"; }
++die()  { printf '\n%serror:%s %s\n' "$C_ERR" "$C_OFF" "$*" >&2; exit 1; }
++have() { command -v "$1" >/dev/null 2>&1; }
++
++usage() {
++    cat <<'EOF'
++EQForge installer + updater. Installs when nothing is installed, updates an
++existing install otherwise. Both cases build from the same source revision.
++
++  --check               report installed vs. available version; change nothing
++  --dry-run             print the plan, change nothing
++  --yes, -y             never prompt (needed for `curl | bash`)
++  --ref REF             git tag / branch / commit to install
++  --channel stable|main newest release tag (default) or tip of main
++  --source-dir DIR      build from a local checkout instead of GitHub
++  --editable            install the python package in editable mode (dev)
++  --prefix DIR          install prefix (default: ~/.local)
++  --system              prefix /usr (needs root)
++  --no-native           skip the C builds (python package only)
++  --no-service          do not stop/restart the systemd user units
++  --no-autostart        do not offer to enable login autostart
++  --force               reinstall even when the version is unchanged
++  --rollback            reinstall the previous version recorded in install.json
++  --uninstall           remove the managed install (keeps ~/.config/eqforge)
++  --purge               with --uninstall: also remove profiles and config
++  --self-test           run the script's own sanity checks (offline, harmless)
++  --version             print this script's version
++  -h, --help            this text
++
++Environment: EQFORGE_REPO, EQFORGE_CHANNEL, EQFORGE_PREFIX, NO_COLOR
++EOF
++}
++
++# ------------------------------------------------------------------ state ----
++MODE="update"          # update | check | dryrun | rollback | uninstall | selftest
++ASSUME_YES=0
++REF=""
++SOURCE_DIR=""
++EDITABLE=0
++DO_NATIVE=1
++DO_SERVICE=1
++DO_AUTOSTART=1
++FORCE=0
++PURGE=0
++PREFIX="${EQFORGE_PREFIX:-$HOME/.local}"
++DATA="${EQFORGE_DATA:-}"
++
++parse_args() {
++    while [ $# -gt 0 ]; do
++        case "$1" in
++            --check) MODE="check" ;;
++            --dry-run) MODE="dryrun" ;;
++            --yes|-y) ASSUME_YES=1 ;;
++            --ref) REF="${2:?--ref needs a value}"; shift ;;
++            --ref=*) REF="${1#*=}" ;;
++            --channel) CHANNEL="${2:?--channel needs a value}"; shift ;;
++            --channel=*) CHANNEL="${1#*=}" ;;
++            --source-dir) SOURCE_DIR="${2:?--source-dir needs a value}"; shift ;;
++            --source-dir=*) SOURCE_DIR="${1#*=}" ;;
++            --editable) EDITABLE=1 ;;
++            --prefix) PREFIX="${2:?--prefix needs a value}"; shift ;;
++            --prefix=*) PREFIX="${1#*=}" ;;
++            --system) PREFIX="/usr"; DATA="/usr/local/lib/eqforge" ;;
++            --no-native) DO_NATIVE=0 ;;
++            --no-service) DO_SERVICE=0 ;;
++            --no-autostart) DO_AUTOSTART=0 ;;
++            --force) FORCE=1 ;;
++            --rollback) MODE="rollback" ;;
++            --uninstall) MODE="uninstall" ;;
++            --purge) PURGE=1 ;;
++            --self-test) MODE="selftest" ;;
++            --version) printf 'eqforge-update %s\n' "$SCRIPT_VERSION"; exit 0 ;;
++            -h|--help) usage; exit 0 ;;
++            *) die "unknown option: $1 (try --help)" ;;
++        esac
++        shift
++    done
++    PREFIX="${PREFIX/#\~/$HOME}"
++    [ -n "$DATA" ] || DATA="${XDG_DATA_HOME:-$HOME/.local/share}/eqforge"
++    DATA="${DATA/#\~/$HOME}"
++}
++
++# Paths (assigned in setup_paths)
++BIN_DIR=""; LIB_DIR=""; LIBEXEC_DIR=""; SPA_DIR=""; VENV=""; SRC_ROOT=""
++MARKER=""; BACKUP_DIR=""; LOCK=""
++
++setup_paths() {
++    BIN_DIR="$PREFIX/bin"
++    LIB_DIR="$PREFIX/lib/eqforge"
++    LIBEXEC_DIR="$PREFIX/libexec/eqforge"
++    SPA_DIR="$PREFIX/lib/spa-0.2/eqforge"
++    VENV="$DATA/venv"
++    SRC_ROOT="$DATA/src"
++    MARKER="$DATA/install.json"
++    BACKUP_DIR="$DATA/backups"
++}
++
++# ------------------------------------------------------------------ helpers --
++# Small python helper: json field out of the state file, empty when absent.
++json_get() {      # json_get FILE KEY
++    [ -f "$1" ] || return 0
++    python3 - "$1" "$2" <<'PY' 2>/dev/null || true
++import json, sys
++try:
++    data = json.load(open(sys.argv[1]))
++except Exception:
++    sys.exit(0)
++value = data
++for part in sys.argv[2].split("."):
++    if not isinstance(value, dict) or part not in value:
++        sys.exit(0)
++    value = value[part]
++if isinstance(value, bool):
++    print("true" if value else "false")
++elif value is not None:
++    print(value)
++PY
++}
++
++json_write() {    # json_write FILE key=value ...  (strings, bools, nulls)
++    python3 - "$@" <<'PY'
++import json, sys
++path = sys.argv[1]
++fields = {}
++for item in sys.argv[2:]:
++    key, _, raw = item.partition("=")
++    if raw in ("true", "false"):
++        fields[key] = raw == "true"
++    elif raw == "null" or raw == "":
++        fields[key] = None
++    else:
++        fields[key] = raw
++with open(path, "w", encoding="utf-8") as fh:
++    json.dump(fields, fh, indent=2, sort_keys=True)
++    fh.write("\n")
++PY
++}
++
++# version comparison using GNU sort -V (Linux): is $1 newer than $2?
++ver_gt() {
++    local a="${1#v}" b="${2#v}"
++    [ -z "$a" ] && return 1
++    [ -z "$b" ] && return 0
++    [ "$a" = "$b" ] && return 1
++    [ "$(printf '%s\n%s\n' "$a" "$b" | sort -V | tail -n1)" = "$a" ]
++}
++
++first_semver() { grep -oE '[0-9]+\.[0-9]+\.[0-9]+' <<<"$1" | head -n1 || true; }
++
++confirm() {       # confirm "question" -> 0 yes / 1 no
++    [ "$ASSUME_YES" = 1 ] && return 0
++    [ -t 0 ] || return 1
++    local reply
++    printf '  %s [Y/n] ' "$1"
++    read -r reply || true
++    case "${reply:-y}" in [Yy]*|"") return 0 ;; *) return 1 ;; esac
++}
++
++# ---------------------------------------------------------------- detection --
++detect_installed() {
++    # Sets: INSTALLED_VERSION INSTALLED_KIND INSTALLED_SOURCE INSTALLED_REF
++    INSTALLED_VERSION=""; INSTALLED_KIND="none"; INSTALLED_SOURCE=""
++    INSTALLED_REF=""; INSTALLED_STAMP=""
++
++    if [ -f "$MARKER" ]; then
++        INSTALLED_VERSION="$(json_get "$MARKER" version)"
++        INSTALLED_SOURCE="$(json_get "$MARKER" source)"
++        INSTALLED_REF="$(json_get "$MARKER" ref)"
++        INSTALLED_STAMP="$(json_get "$MARKER" stamp)"
++        INSTALLED_KIND="managed"
++        return
++    fi
++    if [ -x "$BIN_DIR/eqforge" ]; then
++        INSTALLED_VERSION="$(first_semver "$("$BIN_DIR/eqforge" version 2>&1 || true)")"
++        INSTALLED_KIND="external"
++        return
++    fi
++    if have python3; then
++        # Probe from / so a checkout in the *current* directory is not mistaken
++        # for an installed copy (that is what --source-dir is for), while a
++        # `pip install --user` is still found through the user site directory.
++        local where version
++        # (python3 -c rather than a heredoc: a heredoc inside a command
++        # substitution is a bash parsing minefield and buys nothing here.)
++        where="$(cd / && python3 -c 'import eqforge, os; print(os.path.dirname(os.path.dirname(eqforge.__file__)))' 2>/dev/null || true)"
++        version="$(cd / && python3 -c 'from eqforge.version import __version__; print(__version__)' 2>/dev/null || true)"
++        if [ -n "${where:-}" ] || [ -n "${version:-}" ]; then
++            INSTALLED_VERSION="${version:-}"
++            INSTALLED_KIND="python"
++            INSTALLED_SOURCE="${where:-}"
++            if [ -n "${where:-}" ] && [ -d "$where/.git" ]; then
++                INSTALLED_KIND="checkout"
++            fi
++        fi
++    fi
++}
++
++latest_ref() {
++    # Sets TARGET_REF (what to fetch), TARGET_VERSION (what to show) and
++    # TARGET_STAMP (identity used to decide "already up to date"). The stamp
++    # matters on the main channel, where the version number does not move
++    # between commits: comparing versions there would report "up to date"
++    # forever.
++    if [ -n "$REF" ]; then
++        TARGET_REF="$REF"
++        TARGET_STAMP="$REF"
++        TARGET_VERSION="$(first_semver "$REF")"
++        [ -n "$TARGET_VERSION" ] || TARGET_VERSION="$REF"
++        return
++    fi
++    if [ "$CHANNEL" = "main" ]; then
++        TARGET_REF="main"
++        TARGET_VERSION=""
++        TARGET_STAMP="main"
++        if have git; then
++            local sha
++            sha="$(git ls-remote "$GITHUB" refs/heads/main 2>/dev/null \
++                   | awk '{print $1}' | head -n1)"
++            [ -n "$sha" ] && TARGET_STAMP="main@${sha:0:12}"
++        fi
++        TARGET_VERSION="$TARGET_STAMP"
++        return
++    fi
++    local tag=""
++    if have git; then
++        tag="$(git ls-remote --tags --refs --sort=-v:refname "$GITHUB" \
++               'refs/tags/v*' 2>/dev/null | awk -F/ '{print $NF}' | head -n1)"
++    fi
++    if [ -z "$tag" ]; then
++        # No usable tags (or no git): fall back to the tip of main rather than
++        # failing - "can't tell what the latest release is" must not become
++        # "you cannot install".
++        warn "no release tag found; using main"
++        CHANNEL="main"
++        latest_ref
++        return
++    fi
++    TARGET_REF="$tag"
++    TARGET_VERSION="${tag#v}"
++    TARGET_STAMP="$tag"
++}
++
++# ------------------------------------------------------------------- source --
++fetch_source() {   # fetch_source -> sets SRC_DIR
++    local slug
++    slug="$(printf '%s' "${TARGET_REF}" | tr '/ ' '__')"
++    SRC_DIR="$SRC_ROOT/$slug"
++
++    if [ -n "$SOURCE_DIR" ]; then
++        SRC_DIR="$(cd "$SOURCE_DIR" && pwd)"
++        [ -f "$SRC_DIR/pyproject.toml" ] \
++            || die "$SRC_DIR does not look like an EQForge checkout"
++        ok "source: $SRC_DIR (local)"
++        return
++    fi
++    if [ "$MODE" = "dryrun" ]; then
++        info "would fetch $TARGET_REF into $SRC_DIR"
++        return
++    fi
++    mkdir -p "$SRC_ROOT"
++    if [ -d "$SRC_DIR/.git" ]; then
++        info "updating checkout at $SRC_DIR"
++        git -C "$SRC_DIR" fetch --depth 1 origin "$TARGET_REF" >/dev/null 2>&1 \
++            && git -C "$SRC_DIR" checkout -q FETCH_HEAD \
++            || die "cannot fetch $TARGET_REF"
++    elif have git; then
++        info "cloning $TARGET_REF"
++        git clone --depth 1 --branch "$TARGET_REF" "$GITHUB" "$SRC_DIR" \
++            >/dev/null 2>&1 || die "git clone failed (is $TARGET_REF a real ref?)"
++    else
++        info "downloading $TARGET_REF (no git available)"
++        mkdir -p "$SRC_DIR"
++        curl -fsSL "$CODELOAD/$TARGET_REF" \
++            | tar -xz -C "$SRC_DIR" --strip-components=1 \
++            || die "download of $TARGET_REF failed"
++    fi
++    ok "source: $SRC_DIR"
++}
++
++# -------------------------------------------------------------------- build --
++build_native() {
++    [ "$DO_NATIVE" = 1 ] || { warn "skipping native build (--no-native)"; return; }
++    [ -d "$SRC_DIR/core" ] || die "no core/ in $SRC_DIR"
++
++    step "native core"
++    if [ "$MODE" = "dryrun" ]; then
++        info "would: make -C $SRC_DIR/core && make -C core install PREFIX=$PREFIX"
++    else
++        make -C "$SRC_DIR/core" >/dev/null || die "core build failed (need gcc + make)"
++        make -C "$SRC_DIR/core" install PREFIX="$PREFIX" >/dev/null
++        ok "libeqforge installed in $LIB_DIR"
++    fi
++
++    step "realtime host"
++    if [ "$MODE" = "dryrun" ]; then
++        info "would: make -C $SRC_DIR/rthost (optional)"
++    elif make -C "$SRC_DIR/rthost" >/dev/null 2>&1; then
++        mkdir -p "$LIBEXEC_DIR" "$BIN_DIR"
++        install -m 755 "$SRC_DIR/rthost/build/eqforge-rt" "$LIBEXEC_DIR/eqforge-rt"
++        ln -sf "$LIBEXEC_DIR/eqforge-rt" "$BIN_DIR/eqforge-rt"
++        ok "eqforge-rt installed in $LIBEXEC_DIR"
++    else
++        warn "eqforge-rt not built (libjack / pipewire-jack headers missing)"
++        info "install libjack-jackd2-dev (Debian) or pipewire-jack, then re-run"
++    fi
++
++    step "SPA filter module"
++    if [ "$MODE" = "dryrun" ]; then
++        info "would: make -C $SRC_DIR/pipewire (optional)"
++    elif make -C "$SRC_DIR/pipewire" >/dev/null 2>&1; then
++        mkdir -p "$SPA_DIR"
++        install -m 755 "$SRC_DIR/pipewire/build/libeqforge-filter.so" \
++            "$SPA_DIR/libeqforge-filter.so"
++        ok "module installed in $SPA_DIR"
++        if [ "$PREFIX" != "/usr" ]; then
++            info "user-prefix modules are only loaded with SPA_PLUGIN_DIR or a"
++            info "system install (sudo $0 --system); the rt host needs neither"
++        fi
++    else
++        warn "SPA module not built (libspa-0.2 headers missing) - optional"
++    fi
++}
++
++capture_version() {
++    NEW_VERSION=""
++    [ "$MODE" = "dryrun" ] && return 0
++    [ -x "$BIN_DIR/eqforge" ] || return 0
++    NEW_VERSION="$(first_semver "$("$BIN_DIR/eqforge" version 2>&1 || true)")"
++}
++
++install_python() {
++    step "python package"
++    if [ "$MODE" = "dryrun" ]; then
++        info "would: create $VENV and pip install $SRC_DIR"
++        return
++    fi
++    if [ ! -x "$VENV/bin/python" ]; then
++        info "creating $VENV"
++        python3 -m venv --system-site-packages "$VENV" 2>/dev/null \
++            || python3 -m venv "$VENV" \
++            || die "cannot create a venv (Debian/Ubuntu: apt install python3-venv)"
++    fi
++    "$VENV/bin/python" -m pip install --quiet --upgrade pip >/dev/null 2>&1 || true
++    local mode_flag=""
++    [ "$EDITABLE" = 1 ] && mode_flag="-e"
++    info "installing $TARGET_VERSION"
++    # --no-deps is wrong here (numpy/scipy/soundfile are real requirements), so
++    # a failure to reach the index is reported as such instead of half-hiding.
++    if ! "$VENV/bin/python" -m pip install --quiet --upgrade $mode_flag \
++            "$SRC_DIR" 2>"$DATA/.pip.err"; then
++        warn "pip install failed:"
++        sed 's/^/      /' "$DATA/.pip.err" >&2 || true
++        die "python install failed (network? see $DATA/.pip.err)"
++    fi
++    mkdir -p "$BIN_DIR"
++    ln -sf "$VENV/bin/eqforge" "$BIN_DIR/eqforge"
++    ok "eqforge -> $VENV/bin/eqforge"
++}
++
++# ------------------------------------------------------------------ service --
++unit_exists() { systemctl --user cat "$1" >/dev/null 2>&1; }
++
++stop_units() {
++    [ "$DO_SERVICE" = 1 ] || return 0
++    [ "$MODE" = "dryrun" ] && return 0
++    have systemctl || return 0
++    for unit in eqforge-rt.service eqforge-daemon.service; do
++        if unit_exists "$unit"; then
++            systemctl --user stop "$unit" >/dev/null 2>&1 || true
++        fi
++    done
++}
++
++start_units() {
++    [ "$DO_SERVICE" = 1 ] || return 0
++    [ "$MODE" = "dryrun" ] && return 0
++    have systemctl || { info "no systemctl: not touching services"; return 0; }
++    local units=()
++    for unit in eqforge-rt.service eqforge-daemon.service; do
++        unit_exists "$unit" && units+=("$unit")
++    done
++    [ ${#units[@]} -gt 0 ] || return 0
++    systemctl --user daemon-reload >/dev/null 2>&1 || true
++    systemctl --user restart "${units[@]}" >/dev/null 2>&1 \
++        && ok "restarted ${units[*]}" \
++        || warn "could not restart ${units[*]} (check: journalctl --user -u eqforge-rt)"
++}
++
++backup_native() {
++    [ "$MODE" = "dryrun" ] && return 0
++    local stamp="$DATA/backups/$(date +%Y%m%d-%H%M%S)"
++    mkdir -p "$stamp"
++    local found=0
++    for rel in lib/eqforge libexec/eqforge bin/eqforge-rt lib/spa-0.2/eqforge; do
++        if [ -e "$PREFIX/$rel" ]; then
++            found=1
++            mkdir -p "$stamp/$(dirname "$rel")"
++            cp -a "$PREFIX/$rel" "$stamp/$rel" 2>/dev/null || true
++        fi
++    done
++    if [ "$found" = 1 ]; then
++        echo "$stamp" > "$DATA/last-backup"
++        ok "previous native files backed up in $stamp"
++    fi
++}
++
++restore_native() {
++    local stamp="${1:-}"
++    [ -n "$stamp" ] || stamp="$(cat "$DATA/last-backup" 2>/dev/null || true)"
++    [ -n "$stamp" ] && [ -d "$stamp" ] || return 1
++    for rel in lib/eqforge libexec/eqforge bin/eqforge-rt lib/spa-0.2/eqforge; do
++        [ -e "$stamp/$rel" ] || continue
++        mkdir -p "$PREFIX/$(dirname "$rel")"
++        cp -a "$stamp/$rel" "$PREFIX/$rel" 2>/dev/null || true
++    done
++    ok "native files restored from $stamp"
++}
++
++# ------------------------------------------------------------------- verify --
++verify() {
++    step "verification"
++    if [ "$MODE" = "dryrun" ]; then
++        info "would: $BIN_DIR/eqforge version && $BIN_DIR/eqforge doctor"
++        return
++    fi
++    local out version
++    if out="$("$BIN_DIR/eqforge" version 2>&1)"; then
++        version="$(first_semver "$out")"
++        ok "eqforge version ${version:-unknown}"
++        # Only meaningful when the target is a release: on the main channel
++        # the stamp is a commit, not a version, and the package version only
++        # changes when the maintainer bumps it.
++        case "$TARGET_VERSION" in
++            [0-9]*.[0-9]*.[0-9]*)
++                if [ -n "${version:-}" ] && [ "$version" != "$TARGET_VERSION" ]; then
++                    warn "installed $version, expected $TARGET_VERSION"
++                fi ;;
++        esac
++    else
++        warn "eqforge version failed:"
++        sed 's/^/      /' <<<"$out" >&2 || true
++        return 1
++    fi
++    if "$BIN_DIR/eqforge" doctor >/dev/null 2>&1; then
++        ok "eqforge doctor: clean"
++    else
++        warn "eqforge doctor reported problems: run '$BIN_DIR/eqforge doctor'"
++    fi
++    if have pw-dump; then
++        ok "pipewire tools found"
++    else
++        warn "pw-dump not found: system-wide processing needs PipeWire installed"
++    fi
++}
++
++write_marker() {
++    [ "$MODE" = "dryrun" ] && return 0
++    local sha=""
++    [ -d "$SRC_DIR/.git" ] && sha="$(git -C "$SRC_DIR" rev-parse --short HEAD 2>/dev/null || true)"
++    local autostart="false"
++    [ "$AUTOSTART_ENABLED" = 1 ] && autostart="true"
++    mkdir -p "$DATA"
++    local prev_version="${INSTALLED_VERSION:-}" prev_source="${INSTALLED_SOURCE:-}"
++    local prev_ref="${INSTALLED_REF:-}"
++    json_write "$MARKER" \
++        "version=${NEW_VERSION:-$TARGET_VERSION}" "ref=$TARGET_REF" \
++        "stamp=$TARGET_STAMP" "sha=$sha" \
++        "installed_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
++        "prefix=$PREFIX" "venv=$VENV" "source=$SRC_DIR" \
++        "channel=$CHANNEL" "autostart=$autostart" "editable=$([ "$EDITABLE" = 1 ] && echo true || echo false)" \
++        "previous_version=$prev_version" "previous_source=$prev_source" \
++        "previous_ref=$prev_ref"
++    ok "state written to $MARKER"
++}
++
++autostart_step() {
++    AUTOSTART_ENABLED=0
++    if [ -f "$HOME/.config/systemd/user/eqforge-rt.service" ]; then
++        AUTOSTART_ENABLED=1
++    fi
++    if [ "$DO_AUTOSTART" = 1 ] && [ "$AUTOSTART_ENABLED" = 0 ] && confirm \
++            "start EQForge at login and keep it in the audio path (recommended)?"; then
++        if [ "$MODE" = "dryrun" ]; then
++            info "would: $BIN_DIR/eqforge system autostart on"
++        elif "$BIN_DIR/eqforge" system autostart on >/dev/null 2>&1; then
++            AUTOSTART_ENABLED=1
++            ok "login autostart enabled"
++        else
++            warn "could not enable autostart (run: eqforge system autostart on)"
++        fi
++    elif [ "$AUTOSTART_ENABLED" = 1 ] && [ "$MODE" != "dryrun" ]; then
++        # Units contain absolute paths to the binary and the venv; regenerate
++        # them against this install so an update cannot leave them stale.
++        "$BIN_DIR/eqforge" system autostart on >/dev/null 2>&1 \
++            && ok "login units refreshed" \
++            || warn "could not refresh the login units"
++    fi
++}
++
++# ------------------------------------------------------------------ actions --
++plan_report() {
++    local verb="update"
++    if [ "$INSTALLED_KIND" = "none" ]; then
++        verb="install"
++    fi
++    [ "$MODE" = "dryrun" ] && verb="(dry run) $verb"
++    step "summary"
++    info "action        : $verb"
++    info "installed     : ${INSTALLED_VERSION:-none} (${INSTALLED_KIND})"
++    [ -n "$INSTALLED_SOURCE" ] && info "existing path : $INSTALLED_SOURCE"
++    info "available     : ${TARGET_VERSION:-unknown} (${TARGET_STAMP:-auto})"
++    info "prefix        : $PREFIX"
++    info "python env    : $VENV"
++    info "state file    : $MARKER"
++    if [ "$INSTALLED_KIND" != "none" ] && [ "$INSTALLED_KIND" != "managed" ]; then
++        warn "an unmanaged install was found; this script installs its own copy"
++        info "the new binary takes precedence on PATH; remove the old one with"
++        info "  python3 -m pip uninstall eqforge     (if it was pip --user)"
++    fi
++}
++
++perform_install() {
++    backup_native
++    stop_units
++    fetch_source
++    build_native
++    install_python
++    capture_version
++    autostart_step
++    write_marker
++    start_units
++    verify
++
++    step "done"
++    ok "EQForge ${TARGET_VERSION} is installed in $PREFIX"
++    say ""
++    info "next steps:"
++    info "  $BIN_DIR/eqforge system start --manage    # route audio through it"
++    info "  $BIN_DIR/eqforge system always-on on --now # zero-gap routing policy"
++    info "  $BIN_DIR/eqforge gui                      # graphical interface"
++    case ":$PATH:" in
++        *":$BIN_DIR:"*) ;;
++        *) warn "$BIN_DIR is not on PATH: add it, or call eqforge by full path" ;;
++    esac
++}
++
++do_rollback() {
++    [ -f "$MARKER" ] || die "nothing to roll back to ($MARKER is missing)"
++    local version source ref
++    version="$(json_get "$MARKER" previous_version)"
++    source="$(json_get "$MARKER" previous_source)"
++    ref="$(json_get "$MARKER" previous_ref)"
++    [ -n "${version:-}" ] || die "no previous version recorded in $MARKER"
++    step "rollback to $version"
++    if [ -n "${source:-}" ] && [ -d "$source" ]; then
++        SOURCE_DIR="$source"
++        TARGET_REF="${ref:-$version}"
++        TARGET_VERSION="$version"
++        backup_native
++        stop_units
++        fetch_source
++        build_native
++        install_python
++        restore_native
++        # forget the version we just rolled back from, so a second --rollback
++        # does not bounce between the same two builds
++        json_write "$MARKER" "version=$version" "ref=$TARGET_REF" \
++            "source=$SOURCE_DIR" "prefix=$PREFIX" "venv=$VENV" \
++            "installed_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
++            "previous_version=" "previous_source=" "previous_ref="
++        autostart_step
++        start_units
++        verify
++        return
++    fi
++    warn "previous source is gone; restoring the backed-up native binaries only"
++    restore_native || die "no backup available either - reinstall with --ref $version"
++    start_units
++}
++
++do_uninstall() {
++    step "uninstall"
++    stop_units
++    if have systemctl; then
++        for unit in eqforge-rt.service eqforge-daemon.service; do
++            systemctl --user disable "$unit" >/dev/null 2>&1 || true
++        done
++        rm -f "$HOME/.config/systemd/user/eqforge-rt.service" \
++              "$HOME/.config/systemd/user/eqforge-daemon.service" 2>/dev/null || true
++        systemctl --user daemon-reload >/dev/null 2>&1 || true
++    fi
++    rm -f "$BIN_DIR/eqforge" "$BIN_DIR/eqforge-rt"
++    rm -rf "$LIB_DIR" "$LIBEXEC_DIR" "$SPA_DIR" "$VENV" "$SRC_ROOT" "$MARKER"
++    ok "managed files removed from $PREFIX and $DATA"
++    if [ "$PURGE" = 1 ]; then
++        rm -rf "${XDG_CONFIG_HOME:-$HOME/.config}/eqforge"
++        rm -rf "${XDG_STATE_HOME:-$HOME/.local/state}/eqforge"
++        ok "profiles, config and logs removed"
++    else
++        info "your profiles and settings are kept in"
++        info "  ${XDG_CONFIG_HOME:-$HOME/.config}/eqforge   (use --purge to remove)"
++    fi
++}
++
++run_self_test() {
++    step "self-test"
++    local failures=0
++    t() { if eval "$2"; then ok "$1"; else warn "FAIL: $1"; failures=$((failures+1)); fi; }
++
++    t "python3 present"           "have python3"
++    t "bash version >= 4"         "[ \"${BASH_VERSINFO[0]}\" -ge 4 ]"
++    t "ver_gt 1.2.0 1.1.9"        "ver_gt 1.2.0 1.1.9"
++    t "! ver_gt 1.0.0 1.0.0"      "! ver_gt 1.0.0 1.0.0"
++    t "ver_gt 1.10.0 1.9.0"       "ver_gt 1.10.0 1.9.0"
++    t "ver_gt v2.0.0 1.99.99"     "ver_gt v2.0.0 1.99.99"
++    t "! ver_gt 0.9.0 1.0.0"      "! ver_gt 0.9.0 1.0.0"
++    t "first_semver"              "[ \"\$(first_semver 'eqforge 1.4.2 (git)')\" = 1.4.2 ]"
++
++    local tmp
++    tmp="$(mktemp -d)"
++    json_write "$tmp/state.json" "version=1.2.3" "autostart=true" "source=/x"
++    t "json roundtrip version"    "[ \"\$(json_get "$tmp/state.json" version)\" = 1.2.3 ]"
++    t "json roundtrip bool"       "[ \"\$(json_get "$tmp/state.json" autostart)\" = true ]"
++    t "json missing key empty"    "[ -z \"\$(json_get "$tmp/state.json" nope)\" ]"
++    rm -rf "$tmp"
++
++    if [ "$failures" -eq 0 ]; then
++        say ""
++        ok "self-test: all checks passed"
++        return 0
++    fi
++    say ""
++    warn "self-test: $failures check(s) failed"
++    return 1
++}
++
++# --------------------------------------------------------------------- main --
++main() {
++    parse_args "$@"
++    setup_paths
++
++    if [ "$MODE" = "selftest" ]; then
++        run_self_test
++        exit $?
++    fi
++
++    step "EQForge installer / updater $SCRIPT_VERSION"
++    have python3 || die "python3 is required (install python3 first)"
++    python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)' \
++        || die "python 3.10+ is required (found $(python3 -V 2>&1))"
++
++    if [ "$PREFIX" = "/usr" ] && [ "$EUID" -ne 0 ]; then
++        die "a /usr install needs root: use sudo, or drop --system"
++    fi
++    if [ "$MODE" != "uninstall" ] && [ "$EUID" -eq 0 ] && [ "$PREFIX" != "/usr" ]; then
++        warn "running as root; the default install prefix is for the user"
++        info "pass --system for a /usr install, or run as your normal user"
++    fi
++
++    mkdir -p "$DATA"
++    if have flock && [ "$MODE" != "check" ] && [ "$MODE" != "dryrun" ]; then
++        LOCK="$DATA/.update.lock"
++        exec 9>"$LOCK"
++        flock -n 9 || die "another update is already running"
++    fi
++
++    case "$MODE" in
++        uninstall) do_uninstall; exit 0 ;;
++    esac
++
++    detect_installed
++    if [ "$MODE" = "rollback" ]; then
++        do_rollback
++        exit 0
++    fi
++    latest_ref
++
++    case "$MODE" in
++        check|dryrun)
++            plan_report
++            if [ "$MODE" = "check" ]; then
++                if [ "$INSTALLED_KIND" = "managed" ] && [ -n "${INSTALLED_STAMP:-}" ] \
++                        && [ "${INSTALLED_STAMP}" = "${TARGET_STAMP}" ]; then
++                    say ""
++                    ok "up to date (${INSTALLED_VERSION})"
++                    exit 0
++                fi
++                say ""
++                if [ "$INSTALLED_KIND" = "none" ]; then
++                    info "not installed: run this script without --check to install"
++                elif [ "${INSTALLED_STAMP:-}" = "$TARGET_STAMP" ]; then
++                    info "up to date, but not installed by this script: run with"
++                    info "--force to take it over"
++                else
++                    info "update available: ${INSTALLED_VERSION:-unknown} -> $TARGET_VERSION"
++                fi
++                exit 0
++            fi
++            perform_install
++            exit 0
++            ;;
++    esac
++
++    # normal install/update path
++    if [ "$INSTALLED_KIND" = "managed" ] && [ -n "${INSTALLED_STAMP:-}" ] \
++            && [ "$INSTALLED_STAMP" = "$TARGET_STAMP" ] && [ "$FORCE" != 1 ]; then
++        plan_report
++        say ""
++        ok "already up to date (${INSTALLED_VERSION}); nothing to do (--force to reinstall)"
++        exit 0
++    fi
++
++    plan_report
++    if ! confirm "proceed?"; then
++        info "nothing changed"
++        exit 0
++    fi
++    perform_install
++}
++
++main "$@"
+diff --git a/tests/test_always_on.py b/tests/test_always_on.py
+new file mode 100644
+index 0000000..23408b2
+--- /dev/null
++++ b/tests/test_always_on.py
+@@ -0,0 +1,157 @@
++"""`eqforge system always-on`: routing policy, not routing repair.
++
++The rule this installs tells WirePlumber to create application streams on
++EQForge's inputs, which is the only way to remove the unprocessed onset
++completely (a daemon can only react *after* the stream exists). The tests pin
++the safety properties that make it reasonable to write a policy file on a
++user's machine at all:
++
++  * nothing is written when there is no node to target;
++  * the file is idempotent and never silently overwrites an edited version;
++  * `off` really removes it;
++  * a WirePlumber that would ignore the file is refused, not obeyed.
++"""
++from __future__ import annotations
++
++from pathlib import Path
++
++import pytest
++
++from eqforge.errors import SystemError
++from eqforge.system import always_on as ao
++
++
++@pytest.fixture
++def fake_graph(monkeypatch):
++    """Pretend the rt host's JACK client is in the graph."""
++    monkeypatch.setattr(ao, "detect_node", lambda: "eqforge")
++    monkeypatch.setattr(ao, "_supports_node_rules", lambda: True)
++    monkeypatch.setattr(ao, "wireplumber_version", lambda: (0, 5))
++    return "eqforge"
++
++
++def _file() -> Path:
++    return ao.rule_file()
++
++
++def test_enable_writes_a_node_rule(fake_graph):
++    report = ao.enable()
++    assert report["status"] == "created"
++    assert report["node"] == "eqforge"
++    text = _file().read_text()
++    assert 'target.object = "eqforge"' in text
++    assert 'media.class = "Stream/Output/Audio"' in text
++    # It must not touch microphones or anything else that is not app playback.
++    assert "Stream/Input/Audio" not in text
++
++
++def test_enable_is_idempotent(fake_graph):
++    ao.enable()
++    before = _file().read_text()
++    report = ao.enable()
++    assert report["status"] == "same"
++    assert _file().read_text() == before
++
++
++def test_enable_preserves_a_hand_edited_file(fake_graph):
++    ao.enable()
++    _file().write_text("# my edits\n" + _file().read_text())
++    report = ao.enable()
++    assert report["status"] == "updated"
++    assert report["backup"] is not None
++    assert Path(report["backup"]).exists()
++    assert "my edits" in Path(report["backup"]).read_text()
++
++
++def test_enable_without_a_node_is_refused(monkeypatch):
++    monkeypatch.setattr(ao, "detect_node", lambda: None)
++    monkeypatch.setattr(ao, "_supports_node_rules", lambda: True)
++    with pytest.raises(SystemError) as err:
++        ao.enable()
++    assert "no EQForge node" in err.value.message
++    assert err.value.hint
++    assert not _file().exists()
++
++
++def test_enable_refuses_an_unknown_node(monkeypatch):
++    class View:
++        def node_id(self, name):
++            return None
++
++    monkeypatch.setattr(ao, "_supports_node_rules", lambda: True)
++    monkeypatch.setattr(ao.pw, "pipewire_available", lambda: True)
++    monkeypatch.setattr(ao.pw, "snapshot", lambda: View())
++    with pytest.raises(SystemError) as err:
++        ao.enable("nope")
++    assert "not in the audio graph" in err.value.message
++    assert not _file().exists()
++
++
++def test_old_wireplumber_is_refused_unless_forced(monkeypatch):
++    monkeypatch.setattr(ao, "detect_node", lambda: "eqforge")
++    monkeypatch.setattr(ao, "_supports_node_rules", lambda: False)
++    monkeypatch.setattr(ao, "wireplumber_version", lambda: (0, 4))
++    with pytest.raises(SystemError) as err:
++        ao.enable()
++    assert "0.4" in err.value.message
++    assert not _file().exists()
++
++    report = ao.enable(force=True)
++    assert report["status"] == "created"
++    assert _file().exists()
++
++
++def test_disable_removes_the_rule(fake_graph):
++    ao.enable()
++    res = ao.disable()
++    assert res["removed"] is True
++    assert not _file().exists()
++    # disabling twice is not an error
++    assert ao.disable()["removed"] is False
++
++
++def test_status_reports_the_installed_target(fake_graph):
++    ao.enable()
++    st = ao.status()
++    assert st["installed"] is True
++    assert st["node"] == "eqforge"
++    assert st["node_present"] is True
++    assert st["ok"] is True
++
++
++def test_status_flags_a_target_that_disappeared(monkeypatch):
++    monkeypatch.setattr(ao, "_supports_node_rules", lambda: True)
++    monkeypatch.setattr(ao, "detect_node", lambda: "eqforge_filter")
++    ao.enable()
++    monkeypatch.setattr(ao, "detect_node", lambda: None)   # host stopped
++    st = ao.status()
++    assert st["installed"] is True
++    assert st["node_present"] is False
++    assert st["ok"] is False
++
++
++def test_render_rule_only_targets_playback_streams():
++    text = ao.render_rule("eqforge_filter")
++    assert text.count("matches") == 1
++    assert 'target.object = "eqforge_filter"' in text
++    assert "Stream/Output/Audio" in text
++
++
++def test_cli_status_and_off(fake_graph, capsys):
++    from eqforge.cli import commands_system as cs
++    import types
++
++    args = types.SimpleNamespace(action="always-on", autostart_action="on",
++                                 node=None, now=False, force=False, json=False,
++                                 verbose=False, quiet=False, rt_binary=None,
++                                 channels=None, manage=False, auto_wire=None)
++    assert cs.cmd_system(args) == 0
++    assert "always-on routing" in capsys.readouterr().out
++
++    args.autostart_action = "status"
++    assert cs.cmd_system(args) == 0
++    assert "eqforge" in capsys.readouterr().out
++
++    args.autostart_action = "off"
++    assert cs.cmd_system(args) == 0
++    assert "removed" in capsys.readouterr().out
+diff --git a/tests/test_cli.py b/tests/test_cli.py
+index 095ff15..7e02ae1 100644
+--- a/tests/test_cli.py
++++ b/tests/test_cli.py
+@@ -35,7 +35,7 @@ def run_cli(args: list[str], tmp_path: Path, expect_rc: int = 0,
+ 
+ def test_cli_version(isolated_home):
+     r = run_cli(["version"], isolated_home)
+-    assert "eqforge 1.0.0" in r.stdout
++    assert "eqforge 1.1.0" in r.stdout
+ 
+ 
+ def test_cli_list_profiles(isolated_home):
+diff --git a/tests/test_event_reaction.py b/tests/test_event_reaction.py
+new file mode 100644
+index 0000000..efaaa73
+--- /dev/null
++++ b/tests/test_event_reaction.py
+@@ -0,0 +1,115 @@
++"""The daemon must *react* to the graph, not poll it into place.
++
++Context that makes these tests worth having: before this change the daemon
++looked at the PipeWire graph every 2 seconds. A player that starts a stream is
++linked to the default sink immediately by WirePlumber, so the EQForge rewiring
++pass always ran late - up to 2 s of audio came out unprocessed and then the
++equalizer "snapped in". These checks pin that an event wakes the loop
++immediately instead of the loop waiting out its tick.
++"""
++from __future__ import annotations
++
++import itertools
++import threading
++import time
++import types
++
++import pytest
++
++from eqforge.daemon.server import Daemon
++from eqforge.system import wiring
++
++
++def _daemon(**kw) -> Daemon:
++    kw.setdefault("auto_wire", True)
++    kw.setdefault("tick", 30.0)            # deliberately absurd: no poll help
++    return Daemon(**kw)
++
++
++def test_graph_event_wakes_the_loop():
++    d = _daemon()
++    assert d._wait_for_work is not None
++    d._on_graph_event("graph")
++    t0 = time.monotonic()
++    d._wait_for_work()                     # must not block for the 30 s tick
++    assert time.monotonic() - t0 < 1.0
++    assert d.graph_events == 1
++    # the wake flag is consumed, so the next call falls back to the tick
++    assert not d._graph_wake.is_set()
++
++
++def test_watcher_loop_rewires_on_event(monkeypatch):
++    """An event must produce a wiring pass in well under a second."""
++    d = _daemon()
++    calls: list[float] = []
++
++    def fake_wire(rt_command, graph=None, **kw):
++        calls.append(time.monotonic())
++        report = wiring.WireReport()
++        report.sink = "sink"
++        report.rt_node = "eqforge"
++        return report
++
++    monkeypatch.setattr(wiring, "wire_graph", fake_wire)
++    # A signature that changes on every read: stands in for "the graph really
++    # did change", which is what makes the pass do work instead of no-opping.
++    counter = itertools.count()
++    monkeypatch.setattr(wiring, "stream_signature",
++                        lambda graph=None: f"sig{next(counter)}")
++    monkeypatch.setattr(d, "_ensure_rt_host", lambda: None)
++    monkeypatch.setattr(d.state, "rt_needs_sync", lambda: False)
++
++    class View:
++        def devices(self):
++            return []
++
++        def default_sink(self):
++            return "sink"
++
++    from eqforge.system import pipewire as pw
++    monkeypatch.setattr(pw, "pipewire_available", lambda: True)
++    monkeypatch.setattr(pw, "snapshot", lambda: View())
++    monkeypatch.setattr(d, "_apply_rules", lambda reason: {})
++
++    t = threading.Thread(target=d.watcher_loop, daemon=True)
++    t.start()
++    try:
++        deadline = time.monotonic() + 2.0
++        while not calls and time.monotonic() < deadline:
++            time.sleep(0.02)
++        assert calls, "first pass did not run"
++
++        seen = len(calls)
++        t0 = time.monotonic()
++        d._on_graph_event("graph")
++        while len(calls) == seen and time.monotonic() - t0 < 5.0:
++            time.sleep(0.02)
++        assert len(calls) > seen, "an event did not trigger a rewiring pass"
++        assert time.monotonic() - t0 < 5.0
++    finally:
++        d.stop_event.set()
++        t.join(timeout=5.0)
++    assert not t.is_alive()
++
++
++def test_status_reports_the_watch_channel():
++    d = _daemon()
++    st = d.rpc("status")
++    assert "watch" in st
++    assert st["watch"]["running"] is False        # not started in this test
++    assert st["watch"]["events"] == 0
++
++
++def test_stop_is_safe_without_a_watcher():
++    d = _daemon()
++    d.stop()                                      # must not raise
++
++
++def test_start_graph_watch_degrades_without_a_monitor(monkeypatch):
++    """No `pw-dump -m`: the daemon keeps working on its tick."""
++    d = _daemon()
++    from eqforge.system import watch
++    monkeypatch.setattr(watch.GraphWatcher, "start", lambda self: False)
++    d._start_graph_watch()
++    assert d._watch is None
++    d._stop_graph_watch()
+diff --git a/tests/test_updater.py b/tests/test_updater.py
+new file mode 100644
+index 0000000..6346d2b
+--- /dev/null
++++ b/tests/test_updater.py
+@@ -0,0 +1,147 @@
++"""The one-script installer/updater (`scripts/eqforge-update.sh`).
++
++The script is the only thing a new user is handed, so its contract is narrow
++and worth testing without a network, a build, or a real install:
++
++  * `--self-test` passes (version comparison, state-file JSON roundtrip);
++  * `--dry-run` plans a full install from a local checkout and writes nothing;
++  * `--check` on an empty home says "not installed" and exits 0;
++  * unknown options and missing values fail loudly instead of doing something
++    surprising.
++
++A real end-to-end install (build + venv + pip) is exercised separately, by
++running the script by hand; it needs a compiler, network for wheels, and a
++minute, none of which belong in the unit suite.
++"""
++from __future__ import annotations
++
++import os
++import subprocess
++from pathlib import Path
++
++import pytest
++
++REPO_ROOT = Path(__file__).resolve().parent.parent
++SCRIPT = REPO_ROOT / "scripts" / "eqforge-update.sh"
++
++
++@pytest.fixture(scope="module", autouse=True)
++def _script_exists():
++    assert SCRIPT.is_file(), "the installer must ship with the repo"
++    assert os.access(SCRIPT, os.X_OK), "the installer must be executable"
++
++
++def run_script(*args: str, home: Path, timeout: float = 120.0):
++    env = dict(os.environ)
++    env.update({
++        "HOME": str(home),
++        "XDG_CONFIG_HOME": str(home / "config"),
++        "XDG_DATA_HOME": str(home / "data"),
++        "XDG_STATE_HOME": str(home / "state"),
++        "XDG_RUNTIME_DIR": str(home / "run"),
++        "NO_COLOR": "1",
++        # Never let a test reach GitHub for a version query.
++        "GIT_TERMINAL_PROMPT": "0",
++    })
++    return subprocess.run(["bash", str(SCRIPT), *args], capture_output=True,
++                          text=True, timeout=timeout, env=env)
++
++
++def test_bash_syntax_is_valid():
++    r = subprocess.run(["bash", "-n", str(SCRIPT)], capture_output=True,
++                       text=True, timeout=60)
++    assert r.returncode == 0, r.stderr
++
++
++def test_self_test_passes(tmp_path):
++    r = run_script("--self-test", home=tmp_path)
++    assert r.returncode == 0, r.stdout + r.stderr
++    assert "all checks passed" in r.stdout
++
++
++def test_help_and_version(tmp_path):
++    r = run_script("--help", home=tmp_path)
++    assert r.returncode == 0
++    for flag in ("--check", "--dry-run", "--rollback", "--uninstall",
++                 "--self-test", "--ref", "--source-dir"):
++        assert flag in r.stdout
++
++    r = run_script("--version", home=tmp_path)
++    assert r.returncode == 0
++    assert "eqforge-update" in r.stdout
++
++
++def test_unknown_option_fails_loudly(tmp_path):
++    r = run_script("--not-an-option", home=tmp_path)
++    assert r.returncode != 0
++    assert "unknown option" in (r.stdout + r.stderr)
++
++
++def test_check_on_empty_home_reports_not_installed(tmp_path):
++    r = run_script("--check", "--ref", "v9.9.9", home=tmp_path)
++    assert r.returncode == 0, r.stdout + r.stderr
++    assert "none" in r.stdout            # installed: none
++    assert "not installed" in r.stdout
++    # a check must not create the install tree
++    assert not (tmp_path / "data/eqforge/install.json").exists()
++    assert not (tmp_path / ".local/bin/eqforge").exists()
++
++
++def test_dry_run_plans_an_install_and_changes_nothing(tmp_path):
++    r = run_script("--dry-run", "--yes", "--no-autostart", "--no-service",
++                   "--ref", "1.2.3", "--source-dir", str(REPO_ROOT),
++                   home=tmp_path)
++    assert r.returncode == 0, r.stdout + r.stderr
++    out = r.stdout
++    assert "would: make -C" in out
++    assert "would: create" in out and "venv" in out
++    assert "native core" in out and "python package" in out
++    # nothing may be installed, built or recorded by a dry run
++    assert not (tmp_path / "data/eqforge/install.json").exists()
++    assert not (tmp_path / ".local/bin/eqforge").exists()
++    assert not (tmp_path / ".local/lib/eqforge").exists()
++
++
++def test_dry_run_reports_the_target_version(tmp_path):
++    r = run_script("--dry-run", "--yes", "--ref", "v1.4.0",
++                   "--source-dir", str(REPO_ROOT), home=tmp_path)
++    assert r.returncode == 0, r.stdout + r.stderr
++    assert "1.4.0" in r.stdout
++
++
++def test_source_dir_must_be_a_checkout(tmp_path):
++    empty = tmp_path / "not-a-repo"
++    empty.mkdir()
++    r = run_script("--dry-run", "--yes", "--source-dir", str(empty),
++                   "--ref", "1.0.0", home=tmp_path)
++    assert r.returncode != 0
++    assert "does not look like an EQForge checkout" in (r.stdout + r.stderr)
++
++
++def test_rollback_without_state_errors(tmp_path):
++    r = run_script("--rollback", home=tmp_path)
++    assert r.returncode != 0
++    assert "nothing to roll back" in (r.stdout + r.stderr)
++
++
++def test_uninstall_is_safe_on_a_clean_machine(tmp_path):
++    r = run_script("--uninstall", "--yes", home=tmp_path)
++    assert r.returncode == 0, r.stdout + r.stderr
++    assert "managed files removed" in r.stdout
++
++
++def test_installed_state_is_read_back(tmp_path):
++    """A state file written by an older run drives the next decision."""
++    data = tmp_path / "data/eqforge"
++    data.mkdir(parents=True)
++    (data / "install.json").write_text(
++        '{"version": "1.0.0", "stamp": "v1.0.0", "ref": "v1.0.0",'
++        ' "source": "/nonexistent", "prefix": "x", "venv": "y"}')
++    r = run_script("--check", "--ref", "v1.0.0", home=tmp_path)
++    assert r.returncode == 0
++    assert "up to date" in r.stdout
++    assert "1.0.0" in r.stdout
++
++    r = run_script("--check", "--ref", "v2.0.0", home=tmp_path)
++    assert r.returncode == 0
++    assert "update available" in r.stdout
+diff --git a/tests/test_watch.py b/tests/test_watch.py
+new file mode 100644
+index 0000000..cda85b9
+--- /dev/null
++++ b/tests/test_watch.py
+@@ -0,0 +1,181 @@
++"""The event-driven PipeWire watcher.
++
++The symptom these tests defend against is concrete: audio that starts playing
++takes up to two seconds (the daemon's old poll interval) to pass through the
++equalizer. `GraphWatcher` turns that into a reaction measured in tens of
++milliseconds, and these tests pin the three properties that matter:
++
++  * events are delivered promptly, not on a timer;
++  * a burst of events (one stream start = node + ports + links) is coalesced
++    into a single callback, not one per event;
++  * a monitor that cannot run never wedges the daemon or its shutdown.
++"""
++from __future__ import annotations
++
++import os
++import threading
++import time
++from pathlib import Path
++
++import pytest
++
++from eqforge.system import watch
++
++
++def _fake_monitor(tmp_path: Path, body: str) -> Path:
++    """A stand-in for `pw-dump -m` that prints whatever `body` says."""
++    script = tmp_path / "monitor.sh"
++    script.write_text("#!/bin/sh\n" + body)
++    script.chmod(0o755)
++    return script
++
++
++@pytest.fixture
++def collected():
++    """A callback that records calls and wakes the test."""
++    calls: list[str] = []
++    woke = threading.Event()
++
++    def on_change(reason: str) -> None:
++        calls.append(reason)
++        woke.set()
++
++    return calls, woke, on_change
++
++
++def test_reports_event_promptly(tmp_path, monkeypatch, collected):
++    calls, woke, on_change = collected
++    mon = _fake_monitor(
++        tmp_path,
++        "i=0\n"
++        "while [ $i -lt 50 ]; do\n"
++        "  printf '%s\\n' '{\"id\":7,\"type\":\"PipeWire:Interface:Node\"}'\n"
++        "  i=$((i+1))\n"
++        "  sleep 0.02\n"
++        "done\n")
++    monkeypatch.setenv("EQFORGE_MONITOR_CMD", str(mon))
++    w = watch.GraphWatcher(on_change, debounce=0.01)
++    assert w.start()
++    t0 = time.monotonic()
++    try:
++        assert woke.wait(2.0), "watcher never delivered an event"
++        elapsed = time.monotonic() - t0
++        assert elapsed < 1.0, f"reaction took {elapsed:.2f}s"
++        assert calls == ["graph"]
++        assert w.raw_events >= 1
++    finally:
++        w.stop()
++    assert not w.running
++
++
++def test_burst_is_coalesced(tmp_path, monkeypatch, collected):
++    """One playback start emits many events; the callback runs once."""
++    calls, woke, on_change = collected
++    mon = _fake_monitor(
++        tmp_path,
++        "printf '%s\\n' '{\"type\":\"PipeWire:Interface:Node\",\"id\":1}'\n"
++        "printf '%s\\n' '{\"type\":\"PipeWire:Interface:Port\",\"id\":2}'\n"
++        "printf '%s\\n' '{\"type\":\"PipeWire:Interface:Link\",\"id\":3}'\n"
++        "sleep 30\n")
++    monkeypatch.setenv("EQFORGE_MONITOR_CMD", str(mon))
++    w = watch.GraphWatcher(on_change, debounce=0.15)
++    assert w.start()
++    try:
++        assert woke.wait(2.0)
++        time.sleep(0.4)              # no further burst was produced
++        assert len(calls) == 1, calls
++    finally:
++        w.stop()
++
++
++def test_irrelevant_events_ignored(tmp_path, monkeypatch, collected):
++    calls, woke, on_change = collected
++    mon = _fake_monitor(
++        tmp_path,
++        "printf '%s\\n' '{\"type\":\"PipeWire:Interface:Client\",\"id\":9}'\n"
++        "sleep 30\n")
++    monkeypatch.setenv("EQFORGE_MONITOR_CMD", str(mon))
++    w = watch.GraphWatcher(on_change, debounce=0.02)
++    assert w.start()
++    try:
++        assert not woke.wait(0.5), "a client object must not trigger rewiring"
++        assert calls == []
++    finally:
++        w.stop()
++
++
++def test_callback_exception_does_not_kill_the_watcher(tmp_path, monkeypatch):
++    """A failing rewiring pass must not stop future passes."""
++    seen = []
++    second = threading.Event()
++
++    def on_change(reason: str) -> None:
++        seen.append(reason)
++        if len(seen) == 1:
++            raise RuntimeError("boom")
++        second.set()
++
++    mon = _fake_monitor(
++        tmp_path,
++        "i=0\n"
++        "while [ $i -lt 100 ]; do\n"
++        "  printf '%s\\n' '{\"type\":\"PipeWire:Interface:Node\",\"id\":$i}'\n"
++        "  i=$((i+1))\n"
++        "  sleep 0.1\n"
++        "done\n")
++    monkeypatch.setenv("EQFORGE_MONITOR_CMD", str(mon))
++    w = watch.GraphWatcher(on_change, debounce=0.01)
++    assert w.start()
++    try:
++        assert second.wait(3.0)
++        assert len(seen) >= 2
++    finally:
++        w.stop()
++
++
++def test_missing_monitor_is_reported_not_fatal(monkeypatch, collected):
++    _, _, on_change = collected
++    monkeypatch.setenv("EQFORGE_MONITOR_CMD", "definitely-not-a-real-tool")
++    w = watch.GraphWatcher(on_change)
++    assert w.start() is False
++    assert w.event_capable is False
++    w.stop()                          # must be a no-op, not an exception
++
++
++def test_dead_monitor_is_detected(tmp_path, monkeypatch, collected):
++    """A tool that exists but refuses to monitor must not be retried forever."""
++    _, _, on_change = collected
++    mon = _fake_monitor(tmp_path, "exit 1\n")
++    monkeypatch.setenv("EQFORGE_MONITOR_CMD", str(mon))
++    w = watch.GraphWatcher(on_change, max_restarts=1, restart_backoff=0.01)
++    assert w.start()
++    deadline = time.monotonic() + 5.0
++    while w.running and time.monotonic() < deadline:
++        time.sleep(0.05)
++    assert not w.event_capable
++    w.stop()
++
++
++def test_stats_shape(tmp_path, monkeypatch, collected):
++    _, _, on_change = collected
++    mon = _fake_monitor(tmp_path, "sleep 30\n")
++    monkeypatch.setenv("EQFORGE_MONITOR_CMD", str(mon))
++    w = watch.GraphWatcher(on_change)
++    assert set(w.stats()) == {"running", "event_capable", "events",
++                              "raw_events", "restarts", "command", "error"}
++    assert w.stats()["command"][0] == str(mon)
++
++
++def test_monitor_command_default(monkeypatch):
++    monkeypatch.delenv("EQFORGE_MONITOR_CMD", raising=False)
++    assert watch.monitor_command() == ["pw-dump", "-m"]
++    monkeypatch.setenv("EQFORGE_MONITOR_CMD", "pw-mon --foo")
++    assert watch.monitor_command() == ["pw-mon", "--foo"]
++
++
++def test_available_reflects_environment(monkeypatch):
++    monkeypatch.setenv("EQFORGE_MONITOR_CMD", "definitely-not-a-real-tool")
++    assert watch.available() is False
++    monkeypatch.setenv("EQFORGE_MONITOR_CMD", "sh")
++    assert watch.available() is True
++    assert os.path.basename(watch.monitor_command()[0]) == "sh"
+-- 
+2.47.3
+

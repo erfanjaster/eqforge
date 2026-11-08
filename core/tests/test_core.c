@@ -557,6 +557,8 @@ static void test_chain(void)
     eqf_chain *c = eqf_chain_new(2, 48000, 1024);
     CHECK(c != NULL);
     CHECK(eqf_chain_latency(c) == 0);
+    CHECK(eqf_chain_channels(c) == 2);
+    CHECK(eqf_chain_channels(NULL) == 0);
 
     const char *cfg =
         "{"
@@ -735,7 +737,7 @@ static void test_chain_stats_copy(void)
 static void test_version(void)
 {
     printf("test_version\n");
-    CHECK(strcmp(eqf_version_string(), "1.0.0") == 0);
+    CHECK(strcmp(eqf_version_string(), "1.1.0") == 0);
     CHECK(eqf_abi_version() == EQF_ABI_VERSION);
 }
 

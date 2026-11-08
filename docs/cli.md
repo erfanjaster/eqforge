@@ -89,13 +89,27 @@ in the GUI).
 PipeWire sinks/sources (with kind classification: bluetooth/usb/hdmi/…) and
 running application streams.
 
+### `eqforge system always-on on|off|status`
+Installs a WirePlumber routing rule so new application streams are created on
+EQForge's inputs - processed from their first sample instead of being
+re-routed a moment later. `--now` restarts WirePlumber to apply it; `--node`
+targets a specific node; `status` reports what is installed and whether the
+target is live. See
+[pipewire-integration](pipewire-integration.md#zero-gap-onset-the-first-second-has-no-eq-problem).
+
+```sh
+eqforge system always-on on --now
+eqforge system always-on status --json
+eqforge system always-on off
+```
+
 ### `eqforge daemon start|stop|restart|status|run`
 `run` is the foreground instance (used by systemd units and auto-spawn).
 
 ### `eqforge gui [--port N] [--no-browser] [--wait]`
 Serves the GUI on localhost and opens `xdg-open`.
 
-### `eqforge system setup|start|stop|status|wire`
+### `eqforge system setup|start|stop|status|wire|always-on`
 Manages native integration: writes PipeWire/systemd files (`setup`), runs the
 JACK RT host (`start`, `--manage` to auto-connect to the default sink),
 reports RT latency and engine telemetry (`status`).

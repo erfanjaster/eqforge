@@ -8,7 +8,7 @@ A native C11 DSP core with a real-time-safe contract, first-class PipeWire
 integration, measurement-grade analysis, and a control plane you can script.
 
 [![License: GPLv3 or commercial](https://img.shields.io/badge/license-GPLv3_or_commercial-2f6feb?style=flat-square)](#licensing)
-[![Version](https://img.shields.io/badge/version-1.0.0-1f9d55?style=flat-square)](https://github.com/erfanjaster/eqforge)
+[![Version](https://img.shields.io/badge/version-1.1.0-1f9d55?style=flat-square)](https://github.com/erfanjaster/eqforge)
 [![Python](https://img.shields.io/badge/python-%E2%89%A53.10-3572A5?style=flat-square)](#requirements)
 [![Platform](https://img.shields.io/badge/platform-Linux-e95420?style=flat-square)](#requirements)
 [![Audio](https://img.shields.io/badge/audio-PipeWire_%C2%B7_JACK-0aa5a5?style=flat-square)](#set-it-once-self-maintaining-system-audio)
@@ -123,9 +123,11 @@ control socket. Device and stream discovery from the PipeWire graph, rule-based
 auto-switching per device (Bluetooth headphones plug in → your headphone
 profile activates), desktop notifications, systemd user units, XDG paths.
 
-**Self-maintaining** — login units for both the host and the daemon, and an
-auto-wire watcher that re-links application streams through the processor when
-a player restarts. Crash of the real-time host is recovered automatically. See
+**Self-maintaining** — login units for both the host and the daemon, an
+event-driven watcher that re-links application streams through the processor in
+tens of milliseconds when a player restarts, and an optional WirePlumber policy
+that routes new streams through the processor from their first sample. Crash of
+the real-time host is recovered automatically. See
 [below](#set-it-once-self-maintaining-system-audio).
 
 **File processing** — `eqforge apply` / `batch` render files through the same
@@ -144,6 +146,15 @@ core can't load), corrupt-config quarantine, stale-socket recovery, and
 `eqforge doctor` end-to-end self-tests.
 
 ## Install
+
+One script installs, updates and rolls back — it detects what is already on the
+machine and does the right thing either way:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/erfanjaster/eqforge/main/scripts/eqforge-update.sh | bash
+```
+
+Then, or by hand from a checkout:
 
 ```sh
 # 1. build the native core (needs gcc + make; ~5 seconds)
@@ -220,6 +231,27 @@ Automatic graph rewriting is **off by default**. The daemon is spawned
 implicitly by ordinary commands (`eqforge status`), and silently rewiring
 someone's audio graph from there would be a nasty surprise — so it only rewires
 when you have asked for it, and that preference is persisted.
+
+### Processed from the first sample, not the second one
+
+Re-routing a stream is always slightly late: by the time anyone can move it,
+the player has already started feeding the sink. Three windows existed and all
+three are closed:
+
+| Window | Was | Now |
+|---|---|---|
+| 0 – 2 s | the graph was polled every 2 s, so a re-routed stream could play unprocessed for up to two seconds | the daemon reacts to PipeWire registry events (`pw-dump -m`): **~30–60 ms**, coalesced into one pass per playback start |
+| ~0 – 60 ms | even an instant reaction happens *after* the stream exists | `eqforge system always-on on` installs a WirePlumber rule that creates new streams on EQForge's inputs — **zero** unprocessed samples |
+| 0 – 500 ms | a host or filter node that started before `active-dsp.json` existed ran as pass-through until the next config poll | the SPA node loads its config at creation and looks for a missing file 10×/s; `eqforge-rt` retries ~5×/s until it appears |
+
+```sh
+eqforge system always-on on --now   # policy: streams start on EQForge
+eqforge system always-on status     # is it installed, is the target live?
+eqforge status                      # "graph events" line: events vs. polling
+```
+
+The poll remains as the safety net (default-sink metadata, a dead monitor, a
+shadowing policy), so nothing degrades if events are unavailable.
 
 Details: [docs/pipewire-integration.md](docs/pipewire-integration.md).
 
