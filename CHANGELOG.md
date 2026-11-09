@@ -3,6 +3,22 @@
 All notable changes to EQForge. Versions follow the package version in
 `eqforge/version.py` and `core/include/eqforge/version.h` (kept in sync).
 
+## Unreleased — terminal-free Audio Studio
+
+### Added
+
+* A redesigned, responsive GUI with a searchable profile library, clearer EQ
+  workspace, signal-chain cards, live status/meters, dialogs and shortcuts.
+* Real browser workflows for profile import/export/duplicate/delete, audio
+  upload/analysis, advisor quick fixes and target-matched corrective EQ.
+* GUI controls for output selection, RT start/stop, stream wiring, auto-wire,
+  login autostart, always-on routing, integration repair, Doctor and logs.
+
+### Tests
+
+* `tests/test_gui_actions.py` covers the new profile, upload, target matching,
+  safe-delete, RT-launch and diagnostics paths.
+
 ## 1.1.0 — processed from the first sample
 
 ### Fixed
