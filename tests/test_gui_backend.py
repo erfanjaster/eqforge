@@ -119,3 +119,20 @@ def test_forward_compatible_extra_keys_stay_silent(daemon):
          "eq": {"filters": [{"type": "peak", "freq": 500, "gain_db": 3, "q": 1}]}}
     r = daemon.rpc("save_profile", {"profile": p})
     assert not r.get("warnings"), r.get("warnings")
+
+
+def test_static_assets_are_framable_but_api_responses_are_not():
+    """The bundled GUI may be embedded by a local preview proxy; API data may not.
+
+    X-Frame-Options/ALLOWALL on the app shell lets a loopback proxy render the
+    studio, while `frame-ancestors` + `default-src 'self'` keeps injected
+    third-party code out. JSON/SSE responses stay DENY so nothing else can
+    frame the daemon's data.
+    """
+    server_src = (Path(__file__).resolve().parents[1] /
+                  "eqforge/daemon/server.py").read_text()
+    static_fn = server_src.split("def _static(", 1)[1].split("\n    def ", 1)[0]
+    assert "frame=True" in static_fn, "static assets lost their frame policy"
+    assert '"ALLOWALL"' in server_src
+    assert "frame-ancestors *" in server_src
+    assert 'self.send_header("X-Frame-Options", "DENY")' in server_src

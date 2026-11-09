@@ -182,6 +182,41 @@ function markDirty(v = true) {
   $("#revert-btn").disabled = !v;
 }
 
+// ------------------------------------------------------------- read-out --
+let tipEl = null;
+let lastPointer = null;
+
+function ensureTip() {
+  if (tipEl) return tipEl;
+  const wrap = $(".canvas-wrap");
+  if (!wrap) return null;
+  tipEl = document.createElement("div");
+  tipEl.className = "eq-tip";
+  wrap.appendChild(tipEl);
+  return tipEl;
+}
+
+function hideTip() {
+  lastPointer = null;
+  if (tipEl) tipEl.classList.remove("visible");
+}
+
+function showTip(text, x, y) {
+  const el = ensureTip();
+  if (!el) return;
+  const wrap = $(".canvas-wrap");
+  el.textContent = text;
+  el.classList.add("visible");
+  const maxX = wrap.clientWidth - el.offsetWidth - 8;
+  el.style.left = clamp(x + 14, 8, Math.max(8, maxX)) + "px";
+  el.style.top = clamp(y - 30, 8, wrap.clientHeight - el.offsetHeight - 8) + "px";
+}
+
+function fmtHz(f) {
+  if (f >= 1000) return (f / 1000).toFixed(f >= 10000 ? 1 : 2).replace(/\.0+$/, "") + " kHz";
+  return Math.round(f) + " Hz";
+}
+
 // --------------------------------------------------------- eq canvas --
 const FMIN = 20, FMAX = 20000, SR_VIEW = 48000;
 let GAIN_RANGE = 18;
@@ -215,23 +250,66 @@ function computeCurve(filters, preamp, freqs) {
   return out;
 }
 
+// ------------------------------------------------------------ palette --
+// One source of truth for canvas colours; mirrors the CSS tokens.
+const C = {
+  ink: "#080b10",
+  grid: "rgba(30, 38, 49, .85)",
+  gridStrong: "rgba(43, 54, 68, .9)",
+  axis: "#4d5b6b",
+  label: "#6f7d8d",
+  accent: "#7ee2b8",
+  accentSoft: "rgba(126, 226, 184, .10)",
+  accentGlow: "rgba(126, 226, 184, .30)",
+  band: "#8fb4ff",
+  spectrum: "rgba(126, 141, 160, .55)",
+  handle: "#101822",
+  handleSel: "#8fb4ff",
+  handleInk: "#0b1220",
+};
+const LABEL_FONT = '500 10px Inter, system-ui, sans-serif';
+const MONO_FONT = '500 9.5px ui-monospace, SFMono-Regular, Consolas, monospace';
+
+// Where each band handle is actually drawn. Clustered bands (common in
+// AutoEQ imports) would otherwise pile up invisibly, so overlapping handles
+// are nudged apart vertically. Both drawing and hit-testing use this map.
+function handleLayout(W, H, padL, padR, padT, padB, ymax) {
+  const out = [];
+  const placed = [];
+  currentFilters().forEach((f, i) => {
+    if (f.enabled === false) return;
+    const x = freqToX(f.freq, W, padL, padR);
+    let y = dbToY(f.gain_db || 0, H, padT, padB, ymax);
+    for (let guard = 0; guard < 6; guard++) {
+      const clash = placed.find((p) => Math.abs(p.x - x) < 13 && Math.abs(p.y - y) < 15);
+      if (!clash) break;
+      y = clash.y + 16;
+      if (y > H - padB - 10) y = clash.y - 16;
+    }
+    const pos = { i, x, y: clamp(y, padT + 9, H - padB - 9) };
+    placed.push(pos);
+    out.push(pos);
+  });
+  return out;
+}
+
 function drawEQ() {
   const canvas = $("#eq-canvas");
   const dpr = window.devicePixelRatio || 1;
   const rect = canvas.getBoundingClientRect();
   if (rect.width < 10) return;
-  canvas.width = rect.width * dpr;
-  canvas.height = rect.height * dpr;
+  canvas.width = Math.round(rect.width * dpr);
+  canvas.height = Math.round(rect.height * dpr);
   const ctx = canvas.getContext("2d");
-  ctx.scale(dpr, dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   const W = rect.width, H = rect.height;
-  const padL = 46, padR = 12, padT = 14, padB = 26;
+  const padL = 44, padR = 14, padT = 16, padB = 26;
 
-  // auto gain range
-  const { preamp, filters } = currentDsp();
   const freqs = new Float64Array(400);
   for (let i = 0; i < 400; i++)
     freqs[i] = Math.pow(10, Math.log10(FMIN) + (Math.log10(FMAX) - Math.log10(FMIN)) * i / 399);
+
+  const { preamp, filters } = currentDsp();
   const curve = computeCurve(filters, preamp, freqs);
   let peak = 0;
   for (const v of curve) peak = Math.max(peak, Math.abs(v));
@@ -240,104 +318,193 @@ function drawEQ() {
     ? clamp(Math.ceil((peak + 2) / 6) * 6, 12, 30)
     : parseInt(requestedRange, 10);
   const ymax = GAIN_RANGE;
+  const plotW = W - padL - padR, plotH = H - padT - padB;
+  const zeroY = dbToY(0, H, padT, padB, ymax);
 
+  // ---- background
   ctx.clearRect(0, 0, W, H);
+  ctx.fillStyle = C.ink;
+  ctx.fillRect(0, 0, W, H);
+  const glow = ctx.createRadialGradient(W * 0.5, dbToY(ymax * .55, H, padT, padB, ymax), 0,
+                                        W * 0.5, dbToY(ymax * .55, H, padT, padB, ymax), W * .7);
+  glow.addColorStop(0, "rgba(126,226,184,.045)");
+  glow.addColorStop(1, "rgba(126,226,184,0)");
+  ctx.fillStyle = glow;
+  ctx.fillRect(padL, padT, plotW, plotH);
 
-  // grid
-  ctx.font = "10px Inter, sans-serif";
-  ctx.textAlign = "center";
-  for (const dec of [1, 2, 3, 4]) {
-    for (const m of [1, 2, 5]) {
-      const f = m * Math.pow(10, dec);
-      if (f > FMAX || f < FMIN) continue;
-      const x = freqToX(f, W, padL, padR);
-      ctx.strokeStyle = "#22252f"; ctx.beginPath();
-      ctx.moveTo(x, padT); ctx.lineTo(x, H - padB); ctx.stroke();
-      ctx.fillStyle = "#6b7183";
-      ctx.fillText(f >= 1000 ? (f / 1000) + "k" : String(f), x, H - 9);
-    }
+  // ---- frequency grid
+  const majorF = [20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000];
+  const minorF = [30, 40, 60, 70, 80, 90, 300, 400, 600, 700, 800, 900, 3000, 4000, 6000, 7000, 8000, 9000];
+  ctx.lineWidth = 1;
+  for (const f of minorF) {
+    const x = Math.round(freqToX(f, W, padL, padR)) + .5;
+    ctx.strokeStyle = "rgba(30,38,49,.5)";
+    ctx.beginPath(); ctx.moveTo(x, padT); ctx.lineTo(x, H - padB); ctx.stroke();
   }
+  for (const f of majorF) {
+    const x = Math.round(freqToX(f, W, padL, padR)) + .5;
+    ctx.strokeStyle = C.grid;
+    ctx.beginPath(); ctx.moveTo(x, padT); ctx.lineTo(x, H - padB); ctx.stroke();
+  }
+
+  // ---- gain grid
   const step = ymax * 2 > 36 ? 12 : 6;
+  ctx.font = MONO_FONT;
   ctx.textAlign = "right";
+  ctx.textBaseline = "middle";
   for (let g = -Math.floor(ymax / step) * step; g <= ymax; g += step) {
-    const y = dbToY(g, H, padT, padB, ymax);
-    ctx.strokeStyle = g === 0 ? "#3a3f4d" : "#1e212b";
-    ctx.beginPath(); ctx.moveTo(padL, y); ctx.lineTo(W - padR, y); ctx.stroke();
-    ctx.fillStyle = "#6b7183";
-    ctx.fillText((g > 0 ? "+" : "") + g, padL - 6, y + 3);
+    const y = Math.round(dbToY(g, H, padT, padB, ymax)) + .5;
+    if (g !== 0) {
+      ctx.strokeStyle = "rgba(30,38,49,.75)";
+      ctx.beginPath(); ctx.moveTo(padL, y); ctx.lineTo(W - padR, y); ctx.stroke();
+    }
+    ctx.fillStyle = C.axis;
+    ctx.fillText((g > 0 ? "+" : g < 0 ? "−" : "") + Math.abs(g), padL - 9, y);
   }
 
-  // spectrum overlay
+  // ---- measured spectrum (behind everything)
   if (S.showSpectrum && S.spectrum && S.spectrum.freqs && S.spectrum.freqs.length > 4) {
     const sf = S.spectrum.freqs, sd = S.spectrum.db;
-    let lo = 250, hi = 8000, acc = [], cnt = 0;
-    for (let i = 0; i < sf.length; i++)
-      if (sf[i] >= lo && sf[i] <= hi) { acc.push(sd[i]); cnt++; }
-    const ref = acc.length ? acc.sort((a, b) => a - b)[Math.floor(acc.length / 2)] : 0;
-    ctx.strokeStyle = "rgba(138,144,162,.55)"; ctx.lineWidth = 1.5;
-    ctx.beginPath();
-    let started = false;
+    const ref = (() => {
+      const acc = [];
+      for (let i = 0; i < sf.length; i++)
+        if (sf[i] >= 250 && sf[i] <= 8000) acc.push(sd[i]);
+      if (!acc.length) return 0;
+      acc.sort((a, b) => a - b);
+      return acc[Math.floor(acc.length / 2)];
+    })();
+    const pts = [];
     for (let i = 0; i < sf.length; i++) {
       if (sf[i] < FMIN || sf[i] > FMAX) continue;
       const v = sd[i] - ref;
-      if (Math.abs(v) > ymax) { started = false; continue; }
-      const x = freqToX(sf[i], W, padL, padR), y = dbToY(v, H, padT, padB, ymax);
-      if (!started) { ctx.moveTo(x, y); started = true; } else ctx.lineTo(x, y);
+      if (!Number.isFinite(v) || Math.abs(v) > ymax) { pts.push(null); continue; }
+      pts.push([freqToX(sf[i], W, padL, padR), dbToY(v, H, padT, padB, ymax)]);
     }
+    // fill under the measured curve for depth
+    ctx.beginPath();
+    let open = false;
+    for (const p of pts) {
+      if (!p) { open = false; continue; }
+      if (!open) { ctx.moveTo(p[0], p[1]); open = true; } else ctx.lineTo(p[0], p[1]);
+    }
+    ctx.strokeStyle = C.spectrum;
+    ctx.lineWidth = 1.25;
     ctx.stroke();
+    ctx.lineWidth = 1;
+    // reference markers every octave
+    ctx.fillStyle = "rgba(111,125,141,.55)";
+    for (const f of majorF) {
+      const x = freqToX(f, W, padL, padR);
+      ctx.fillRect(x - .5, H - padB, 1, 4);
+    }
+  }
+
+  // ---- per-band ghosts
+  if (S.showGhosts) {
+    for (let i = 0; i < filters.length; i++) {
+      const f = filters[i];
+      if (f.enabled === false) continue;
+      const d = designBiquad(f.type || "peak", f.freq, f.gain_db || 0,
+                             f.q || 1, SR_VIEW, f.use_q);
+      const isSel = i === S.selectedBand;
+      ctx.strokeStyle = isSel ? "rgba(143,180,255,.9)" : "rgba(143,180,255,.34)";
+      ctx.lineWidth = isSel ? 1.6 : 1.1;
+      ctx.beginPath();
+      for (let k = 0; k < freqs.length; k++) {
+        const x = freqToX(freqs[k], W, padL, padR);
+        const y = dbToY(magnitudeDb(d, freqs[k], SR_VIEW), H, padT, padB, ymax);
+        k === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+      }
+      ctx.stroke();
+    }
     ctx.lineWidth = 1;
   }
 
-  // per-band ghosts
-  if (S.showGhosts) for (let i = 0; i < filters.length; i++) {
-    const f = filters[i];
-    if (f.enabled === false) continue;
-    const d = designBiquad(f.type || "peak", f.freq, f.gain_db || 0,
-                           f.q || 1, SR_VIEW, f.use_q);
-    ctx.strokeStyle = i === S.selectedBand ? "rgba(139,174,248,.85)"
-                                             : "rgba(139,174,248,.35)";
-    ctx.lineWidth = i === S.selectedBand ? 1.8 : 1.2;
-    ctx.beginPath();
-    for (let k = 0; k < freqs.length; k++) {
-      const v = magnitudeDb(d, freqs[k], SR_VIEW);
-      const x = freqToX(freqs[k], W, padL, padR);
-      const y = dbToY(v, H, padT, padB, ymax);
-      k === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
-    }
-    ctx.stroke();
-  }
-
-  // total curve (filled)
-  ctx.beginPath();
+  // ---- total response
+  const path = new Path2D();
   for (let i = 0; i < freqs.length; i++) {
     const x = freqToX(freqs[i], W, padL, padR);
     const y = dbToY(curve[i], H, padT, padB, ymax);
-    i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+    i === 0 ? path.moveTo(x, y) : path.lineTo(x, y);
   }
-  ctx.strokeStyle = "#9ce3b1"; ctx.lineWidth = 2.5; ctx.stroke();
-  ctx.lineTo(freqToX(FMAX, W, padL, padR), dbToY(0, H, padT, padB, ymax));
-  ctx.lineTo(freqToX(FMIN, W, padL, padR), dbToY(0, H, padT, padB, ymax));
-  ctx.closePath();
-  ctx.fillStyle = "rgba(156,227,177,.07)"; ctx.fill();
-  ctx.lineWidth = 1;
+  // fill toward the 0 dB line
+  const fill = new Path2D(path);
+  fill.lineTo(freqToX(FMAX, W, padL, padR), zeroY);
+  fill.lineTo(freqToX(FMIN, W, padL, padR), zeroY);
+  fill.closePath();
+  const grad = ctx.createLinearGradient(0, padT, 0, H - padB);
+  grad.addColorStop(0, "rgba(126,226,184,.20)");
+  grad.addColorStop(.5, "rgba(126,226,184,.06)");
+  grad.addColorStop(1, "rgba(126,226,184,.015)");
+  ctx.fillStyle = grad;
+  ctx.fill(fill);
 
-  // band handles
-  for (let i = 0; i < filters.length; i++) {
-    const f = filters[i];
-    if (f.enabled === false) continue;
-    const x = freqToX(f.freq, W, padL, padR);
-    const y = dbToY(f.gain_db || 0, H, padT, padB, ymax);
-    const sel = i === S.selectedBand, hov = i === S.hoverBand;
+  ctx.save();
+  ctx.shadowColor = C.accentGlow;
+  ctx.shadowBlur = 12;
+  ctx.strokeStyle = C.accent;
+  ctx.lineWidth = 2;
+  ctx.lineJoin = "round";
+  ctx.stroke(path);
+  ctx.restore();
+
+  // ---- 0 dB line over the fill
+  ctx.strokeStyle = "rgba(126,226,184,.35)";
+  ctx.setLineDash([3, 4]);
+  ctx.beginPath();
+  ctx.moveTo(padL, Math.round(zeroY) + .5);
+  ctx.lineTo(W - padR, Math.round(zeroY) + .5);
+  ctx.stroke();
+  ctx.setLineDash([]);
+
+  // ---- band handles
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  const handles = handleLayout(W, H, padL, padR, padT, padB, ymax);
+  // draw the selected / hovered handle last so it always sits on top
+  handles.sort((a, b) => (a.i === S.selectedBand || a.i === S.hoverBand ? 1 : 0) -
+                         (b.i === S.selectedBand || b.i === S.hoverBand ? 1 : 0));
+  for (const pos of handles) {
+    const f = currentFilters()[pos.i];
+    const x = pos.x, y = pos.y;
+    const sel = pos.i === S.selectedBand, hov = pos.i === S.hoverBand;
+    const r = sel || hov ? 10 : 8.5;
+
+    if (sel) {
+      // crossing guides make the selected band unambiguous
+      ctx.strokeStyle = "rgba(143,180,255,.20)";
+      ctx.setLineDash([2, 3]);
+      ctx.beginPath(); ctx.moveTo(x, padT); ctx.lineTo(x, H - padB); ctx.stroke();
+      ctx.setLineDash([]);
+    }
+
     ctx.beginPath();
-    ctx.arc(x, y, sel || hov ? 8 : 6, 0, Math.PI * 2);
-    ctx.fillStyle = sel ? "#8baef8" : (hov ? "#5d7fc4" : "#31415f");
+    ctx.arc(x, y, r, 0, Math.PI * 2);
+    ctx.fillStyle = sel ? C.handleSel : (hov ? "#2a3a55" : C.handle);
     ctx.fill();
-    ctx.strokeStyle = "#cdd6f4"; ctx.stroke();
-    ctx.fillStyle = "#e8eaf2";
-    ctx.textAlign = "center"; ctx.font = "bold 8.5px Inter, sans-serif";
-    ctx.fillText(TYPE_SHORT[f.type] || "PK", x, y + 3);
+    ctx.lineWidth = sel ? 0 : 1.4;
+    ctx.strokeStyle = sel ? "rgba(255,255,255,.85)" : "rgba(143,180,255,.62)";
+    ctx.stroke();
+    ctx.lineWidth = 1;
+
+    ctx.fillStyle = sel ? C.handleInk : "rgba(203,219,245,.9)";
+    ctx.font = '700 8px Inter, system-ui, sans-serif';
+    ctx.fillText(TYPE_SHORT[f.type] || "PK", x, y + .5);
   }
-  ctx.font = "10px Inter, sans-serif";
+
+  // ---- frequency labels
+  ctx.font = MONO_FONT;
+  ctx.fillStyle = C.label;
+  ctx.textAlign = "center";
+  ctx.textBaseline = "alphabetic";
+  for (const f of majorF) {
+    const x = freqToX(f, W, padL, padR);
+    const label = f >= 1000 ? (f / 1000) + "k" : String(f);
+    // keep the edge labels inside the plot instead of clipping them
+    if (x < padL + 10) { ctx.textAlign = "left"; ctx.fillText(label, padL, H - 9); }
+    else if (x > W - padR - 10) { ctx.textAlign = "right"; ctx.fillText(label, W - padR, H - 9); }
+    else { ctx.textAlign = "center"; ctx.fillText(label, x, H - 9); }
+  }
 }
 
 // -------------------------------------------------------- eq interaction --
@@ -348,15 +515,10 @@ function bandAt(mx, my) {
   const rect = canvas.getBoundingClientRect();
   const W = rect.width, H = rect.height;
   const padL = 46, padR = 12, padT = 14, padB = 26;
-  const filters = currentFilters();
-  let best = -1, bestD = 1e9;
-  for (let i = 0; i < filters.length; i++) {
-    const f = filters[i];
-    if (f.enabled === false) continue;
-    const x = freqToX(f.freq, W, padL, padR);
-    const y = dbToY(f.gain_db || 0, H, padT, padB, GAIN_RANGE);
-    const d = Math.hypot(x - mx, y - my);
-    if (d < 14 && d < bestD) { bestD = d; best = i; }
+  let best = -1, bestD = 15;
+  for (const pos of handleLayout(W, H, padL, padR, padT, padB, GAIN_RANGE)) {
+    const d = Math.hypot(pos.x - mx, pos.y - my);
+    if (d < bestD) { bestD = d; best = pos.i; }
   }
   return best;
 }
@@ -368,6 +530,7 @@ function initEQInteraction() {
     return { W: r.width, H: r.height, padL: 46, padR: 12, padT: 14, padB: 26 };
   };
   canvas.addEventListener("pointerdown", (e) => {
+    hideTip();
     const r = canvas.getBoundingClientRect();
     const mx = e.clientX - r.left, my = e.clientY - r.top;
     const idx = bandAt(mx, my);
@@ -392,9 +555,18 @@ function initEQInteraction() {
       const idx = bandAt(mx, my);
       if (idx !== S.hoverBand) { S.hoverBand = idx; drawEQ(); }
       canvas.style.cursor = idx >= 0 ? "grab" : "crosshair";
+      const { W, H, padL, padR, padT, padB } = geom();
+      if (mx < padL || mx > W - padR || my < padT || my > H - padB) { hideTip(); return; }
+      const fq = xToFreq(mx, W, padL, padR);
+      const gain = yToDb(my, H, padT, padB, GAIN_RANGE);
+      const band = idx >= 0 ? currentFilters()[idx] : null;
+      showTip(band
+        ? `${TYPE_SHORT[band.type] || "PK"} · ${fmtHz(band.freq)} · ${(band.gain_db || 0).toFixed(1)} dB · Q ${(band.q || 1).toFixed(2)}`
+        : `${fmtHz(fq)} · ${gain > 0 ? "+" : ""}${gain.toFixed(1)} dB`, mx, my);
     }
   });
   canvas.addEventListener("pointerup", () => { drag = null; });
+  canvas.addEventListener("pointerleave", hideTip);
   canvas.addEventListener("wheel", (e) => {
     const r = canvas.getBoundingClientRect();
     const idx = bandAt(e.clientX - r.left, e.clientY - r.top);
@@ -405,6 +577,8 @@ function initEQInteraction() {
                   0.1, 40);
       S.selectedBand = idx;
       markDirty(); renderBands(); drawEQ();
+      showTip(`${TYPE_SHORT[f.type] || "PK"} · ${fmtHz(f.freq)} · Q ${f.q.toFixed(2)}`,
+              e.clientX - r.left, e.clientY - r.top);
     }
   }, { passive: false });
   canvas.addEventListener("dblclick", (e) => {
@@ -448,7 +622,7 @@ function renderBands() {
   const filters = currentFilters();
   $("#band-count").textContent = `${filters.length} band${filters.length === 1 ? "" : "s"}`;
   if (!filters.length) {
-    tbody.innerHTML = '<tr><td colspan="7" class="band-empty">No bands yet — double-click the curve or use Add band.</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="7" class="band-empty">No bands yet — double-click the curve or press Add band.</td></tr>';
   }
   filters.forEach((f, i) => {
     const tr = document.createElement("tr");
@@ -505,31 +679,57 @@ function updatePreamp() {
 }
 
 // --------------------------------------------------------- chain strip --
+const STAGE_META = [
+  { key: "crossfeed", label: "Crossfeed", icon: "i-link",
+    hint: "Blends channels for headphone listening",
+    params: [["level_db", "Level", "dB"], ["fc_hz", "Cutoff", "Hz"]] },
+  { key: "compressor", label: "Compressor", icon: "i-wave",
+    hint: "Tames dynamic peaks before the limiter",
+    params: [["threshold_db", "Threshold", "dB"], ["ratio", "Ratio", ":1"]] },
+  { key: "limiter", label: "Limiter", icon: "i-lock",
+    hint: "Ceiling guard against clipping",
+    params: [["ceiling_db", "Ceiling", "dB"], ["lookahead_ms", "Look-ahead", "ms"]] },
+];
+
+function stageChip({ label, icon, hint, enabled, paramsHtml }) {
+  const el = document.createElement("div");
+  el.className = "stage" + (enabled ? " on" : "");
+  el.innerHTML = `<span class="stage-dot"></span>
+    <span class="stage-name">${esc(label)}</span>
+    ${paramsHtml || ""}`;
+  if (hint) el.title = hint;
+  return el;
+}
+
 function renderChain() {
   const r = S.resolved || {};
-  const stages = [
-    { key: "crossfeed", label: "Crossfeed",
-      params: [["level_db", "dB"], ["fc_hz", "Hz"]] },
-    { key: "compressor", label: "Compressor",
-      params: [["threshold_db", "thr"], ["ratio", ":1"]] },
-    { key: "limiter", label: "Limiter",
-      params: [["ceiling_db", "ceil dB"], ["lookahead_ms", "LA ms"]] },
-  ];
   const strip = $("#chain-strip");
   strip.innerHTML = "";
-  // preamp chip
+
+  // ---- preamp (always active: it is the headroom stage)
   const pre = r.preamp || {};
-  const chip = document.createElement("div");
-  chip.className = "stage on";
-  chip.innerHTML = `<span class="stage-dot"></span>Preamp
-    <span class="stage-params">
-      <select id="preamp-mode">
-        <option value="auto" ${pre.mode !== "manual" ? "selected" : ""}>auto</option>
-        <option value="manual" ${pre.mode === "manual" ? "selected" : ""}>manual</option>
+  const auto = pre.mode !== "manual";
+  const chip = stageChip({
+    label: "Preamp",
+    icon: "i-sliders",
+    hint: "Headroom compensation for positive gain",
+    enabled: true,
+    paramsHtml: `<span class="stage-params">
+      <select id="preamp-mode" title="Preamp mode">
+        <option value="auto" ${auto ? "selected" : ""}>Auto</option>
+        <option value="manual" ${!auto ? "selected" : ""}>Manual</option>
       </select>
-      <input type="number" id="preamp-gain" step="0.5" style="width:64px"
-        value="${(pre.gain_db || 0).toFixed(1)}" ${pre.mode !== "manual" ? "disabled" : ""}>
-    </span>`;
+      <input type="number" id="preamp-gain" step="0.5" step="0.1"
+        value="${(pre.gain_db || 0).toFixed(1)}"
+        ${auto ? "disabled" : ""} title="Manual preamp gain (dB)">
+    </span>`,
+  });
+  if (auto) {
+    const auto_val = currentDsp().preamp;
+    chip.querySelector("#preamp-gain").value = auto_val.toFixed(1);
+    chip.querySelector("#preamp-gain").title =
+      `Automatic preamp: ${auto_val.toFixed(1)} dB (follows the highest boost)`;
+  }
   strip.appendChild(chip);
   chip.querySelector("#preamp-mode").addEventListener("change", (e) => {
     S.resolved.preamp = { ...(S.resolved.preamp || {}), mode: e.target.value };
@@ -540,24 +740,27 @@ function renderChain() {
   chip.querySelector("#preamp-gain").addEventListener("change", (e) => {
     S.resolved.preamp = { ...(S.resolved.preamp || {}), mode: "manual",
                           gain_db: parseFloat(e.target.value) || 0 };
-    markDirty(); updatePreamp(); drawEQ();
+    markDirty(); updatePreamp(); drawEQ(); renderChain();
   });
 
-  for (const st of stages) {
+  // ---- processing stages
+  for (const st of STAGE_META) {
     const cfg = r[st.key] || {};
-    const el = document.createElement("div");
-    el.className = "stage" + (cfg.enabled ? " on" : "");
     let paramsHtml = "";
     if (cfg.enabled) {
-      paramsHtml = `<span class="stage-params">` + st.params.map(([k, unit]) =>
-        `<input type="number" step="any" data-stage="${st.key}" data-p="${k}"
-          value="${cfg[k] ?? ""}" title="${unit}">`).join("") + `</span>`;
+      paramsHtml = `<span class="stage-params">` + st.params.map(([k, name, unit]) =>
+        `<label class="param" title="${esc(name)} (${esc(unit)})">
+           <em>${esc(name)}</em>
+           <input type="number" step="any" data-stage="${st.key}" data-p="${k}"
+             value="${cfg[k] ?? ""}" aria-label="${esc(name)} in ${esc(unit)}">
+         </label>`).join("") + `</span>`;
     }
-    el.innerHTML = `<span class="stage-dot"></span>${st.label}${paramsHtml}`;
+    const el = stageChip({ label: st.label, icon: st.icon, hint: st.hint,
+                           enabled: !!cfg.enabled, paramsHtml });
     el.addEventListener("click", (e) => {
       if (e.target.tagName === "INPUT") return;
       S.resolved[st.key] = { ...(S.resolved[st.key] || defaults(st.key)),
-                             enabled: !(cfg.enabled) };
+                             enabled: !cfg.enabled };
       markDirty(); renderChain();
     });
     strip.appendChild(el);
@@ -636,6 +839,7 @@ async function activateProfile(id, force) {
     $("#profile-description").textContent = S.resolved.description ||
       `${meta.builtin ? "Factory preset" : "Custom profile"} · ${currentFilters().length} EQ bands · ready to shape`;
     $("#profile-select").value = id;
+    $("#profile-select").title = S.resolved.name || id;
     closeSidebar();
     renderBands(); renderChain(); drawEQ(); updatePreamp();
     await loadProfiles();
@@ -653,9 +857,15 @@ async function saveProfile(saveAs) {
   let id = r.id, name = r.name;
   if (saveAs || r.builtin) {
     const res = await modal(
-      saveAs ? "Save as new profile" : "Built-in profiles are read-only — save a copy",
-      [{ label: "id", value: saveAs ? "" : id + "-custom" },
-       { label: "name", value: name + (saveAs ? "" : " (custom)") }]);
+      saveAs ? "Save as a new profile" : "This preset is read-only — save a copy",
+      [{ label: "id", title: "Profile ID", value: saveAs ? id + "-copy" : id + "-custom",
+         placeholder: "e.g. my-tuning", help: "Letters, digits, dot, dash or underscore." },
+       { label: "name", title: "Display name", value: name + (saveAs ? " (copy)" : " (custom)"),
+         placeholder: "e.g. My tuning" }],
+      { eyebrow: saveAs ? "SAVE AS" : "SAVE A COPY", okText: saveAs ? "Save copy" : "Save copy",
+        description: saveAs
+          ? "Stores the current edits as an independent profile. The original is left untouched."
+          : "Factory presets cannot be overwritten. Your edits are stored as a new custom profile." });
     if (!res) return;
     id = (res.id || "").trim(); name = (res.name || "").trim();
     if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(id)) {
@@ -702,11 +912,17 @@ function modal(title, fields = [], options = {}) {
       body.appendChild(wrap); inputs.push([f.label, inp]);
     }
     const ok = $("#modal-ok");
+    const cancel = $("#modal-cancel");
+    cancel.classList.toggle("hidden", !!options.hideCancel);
     ok.textContent = options.okText || "Confirm";
     ok.classList.toggle("danger", !!options.danger);
     ok.classList.toggle("primary", !options.danger);
     back.classList.remove("hidden");
-    inputs[0] && inputs[0][1].focus();
+    if (inputs[0]) {
+      inputs[0][1].focus();
+      // a pre-filled suggestion should be replaced by typing, not edited
+      if (inputs[0][1].value) inputs[0][1].select();
+    }
     const done = (val) => {
       back.classList.add("hidden");
       ok.onclick = null; $("#modal-cancel").onclick = null; $("#modal-close").onclick = null;
@@ -714,7 +930,7 @@ function modal(title, fields = [], options = {}) {
       resolve(val);
     };
     const onKey = (e) => {
-      if (e.key === "Escape") done(null);
+      if (e.key === "Escape") done(options.hideCancel ? (options.okValue ?? "") : null);
       if (e.key === "Enter" && e.target.tagName === "INPUT") ok.click();
     };
     ok.onclick = () => done(Object.fromEntries(inputs.map(([k, i]) => [k, i.value])));
@@ -757,9 +973,11 @@ async function exportCurrentProfile() {
 async function duplicateCurrentProfile() {
   if (!S.resolved) return;
   const res = await modal("Duplicate profile", [
-    { label: "id", title: "New profile ID", value: `${S.currentId}-copy` },
+    { label: "id", title: "New profile ID", value: `${S.currentId}-copy`,
+      help: "Letters, digits, dot, dash or underscore." },
     { label: "name", title: "Display name", value: `${S.resolved.name || S.currentId} (copy)` },
-  ], { description: "Create an independent, fully editable copy.", okText: "Create copy" });
+  ], { eyebrow: "DUPLICATE", description: "Creates an independent, fully editable copy.",
+       okText: "Create copy" });
   if (!res) return;
   const id = res.id.trim(), name = res.name.trim();
   if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(id) || !name) {
@@ -783,8 +1001,8 @@ async function deleteCurrentProfile() {
   if (current && current.builtin) { toast("Factory presets are read-only. Duplicate one to customize it.", true); return; }
   const name = (S.resolved || {}).name || S.currentId;
   const res = await modal("Delete this profile?", [], {
-    description: `“${name}” will be removed from your library. This cannot be undone.`,
-    okText: "Delete profile", danger: true, eyebrow: "DANGER ZONE",
+    description: `“${name}” will be permanently removed from your library. If it is the active profile, EQForge falls back to Flat.`,
+    okText: "Delete profile", danger: true, eyebrow: "DESTRUCTIVE ACTION",
   });
   if (!res) return;
   try {
@@ -881,19 +1099,55 @@ function drawMiniSpectrum() {
   if (!c || !S.spectrum) return;
   const dpr = window.devicePixelRatio || 1;
   const rect = c.getBoundingClientRect();
-  c.width = rect.width * dpr; c.height = rect.height * dpr;
-  const ctx = c.getContext("2d"); ctx.scale(dpr, dpr);
-  const W = rect.width, H = rect.height;
+  const W = rect.width, H = rect.height || 84;
+  if (W < 10) return;
+  c.width = Math.round(W * dpr); c.height = Math.round(H * dpr);
+  const ctx = c.getContext("2d");
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, W, H);
+
+  const padT = 8, padB = 8, padL = 4, padR = 4;
   const { freqs, db } = S.spectrum;
-  const lo = Math.min(...db), hi = Math.max(...db);
-  ctx.strokeStyle = "#8baef8"; ctx.beginPath();
-  for (let i = 0; i < freqs.length; i++) {
-    const x = (Math.log10(freqs[i]) - Math.log10(20)) /
-              (Math.log10(20000) - Math.log10(20)) * W;
-    const y = H - (db[i] - lo) / (hi - lo + 1e-9) * (H - 8) - 4;
-    i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+  let lo = Infinity, hi = -Infinity;
+  for (const v of db) { if (v < lo) lo = v; if (v > hi) hi = v; }
+  if (!Number.isFinite(lo) || hi - lo < 1e-6) { hi = lo + 1; }
+  const xOf = (f) => padL + (Math.log10(clamp(f, 20, 20000)) - Math.log10(20)) /
+                      (Math.log10(20000) - Math.log10(20)) * (W - padL - padR);
+  const yOf = (v) => H - padB - (v - lo) / (hi - lo) * (H - padT - padB);
+
+  // subtle octave grid
+  ctx.font = '500 8.5px ui-monospace, monospace';
+  ctx.textAlign = "center";
+  for (const f of [20, 100, 1000, 10000]) {
+    const x = Math.round(xOf(f)) + .5;
+    ctx.strokeStyle = "rgba(30,38,49,.8)";
+    ctx.beginPath(); ctx.moveTo(x, padT); ctx.lineTo(x, H - padB); ctx.stroke();
   }
-  ctx.stroke();
+
+  // area + line
+  const path = new Path2D();
+  for (let i = 0; i < freqs.length; i++) {
+    if (!Number.isFinite(freqs[i]) || !Number.isFinite(db[i])) continue;
+    const x = xOf(freqs[i]), y = yOf(db[i]);
+    path.lineTo(x, y);
+  }
+  const fill = new Path2D(path);
+  fill.lineTo(W - padR, H - padB);
+  fill.lineTo(padL, H - padB);
+  fill.closePath();
+  const grad = ctx.createLinearGradient(0, padT, 0, H - padB);
+  grad.addColorStop(0, "rgba(143,180,255,.22)");
+  grad.addColorStop(1, "rgba(143,180,255,.01)");
+  ctx.fillStyle = grad; ctx.fill(fill);
+  ctx.strokeStyle = "rgba(143,180,255,.85)";
+  ctx.lineWidth = 1.25; ctx.lineJoin = "round";
+  ctx.stroke(path);
+  ctx.lineWidth = 1;
+
+  // scale read-out
+  ctx.fillStyle = "rgba(111,125,141,.85)";
+  ctx.textAlign = "left"; ctx.fillText(Math.round(hi) + " dB", padL + 1, padT + 8);
+  ctx.textAlign = "right"; ctx.fillText(Math.round(lo) + " dB", W - padR - 1, H - padB - 2);
 }
 
 async function generateSuggestedEQ() {
@@ -920,6 +1174,7 @@ async function loadDevices() {
     select.innerHTML = "";
     select.disabled = !r.available;
     $("#pw-mini-status").textContent = r.available ? "Ready" : "Unavailable";
+    $("#pw-mini-status").classList.toggle("warn", !r.available);
     if (!r.available) {
       select.innerHTML = "<option>PipeWire not available</option>";
       $("#device-info").textContent = "Install and start PipeWire to manage system audio.";
@@ -1082,7 +1337,7 @@ async function showLogs() {
     const text = ["REAL-TIME ENGINE", ...(r.rt.length ? r.rt : ["No engine log entries."]),
                   "", "BACKGROUND SERVICE", ...(r.daemon.length ? r.daemon : ["No daemon log entries."])].join("\n");
     await modal("Recent engine logs", [], {
-      description: "The latest diagnostics from this computer.", okText: "Done",
+      description: "The latest diagnostics from this computer.", okText: "Close", hideCancel: true,
       bodyHtml: `<div class="log-view">${esc(text)}</div>`,
     });
   } catch (e) { toast(e.message, true); }
@@ -1094,14 +1349,19 @@ function renderMeters(rt) {
   const dot = $("#dot-rt");
   if (rt && rt.running) {
     dot.classList.add("ok");
-    $("#m-lufs").textContent = (rt.momentary_lufs ?? -70).toFixed(1) + " LUFS";
-    $("#m-lim").textContent = (rt.limiter_gain_db ?? 0).toFixed(1) + " dB";
+    const lufs = rt.momentary_lufs ?? -70;
+    $("#m-lufs").innerHTML = lufs <= -69
+      ? '−∞ <small>LUFS</small>'
+      : `${lufs.toFixed(1)} <small>LUFS</small>`;
+    $("#m-lim").innerHTML = `${(rt.limiter_gain_db ?? 0).toFixed(1)} <small>dB</small>`;
     const sr = rt.sample_rate || 48000;
     $("#m-latency").textContent = rt.latency_frames != null ?
       `${rt.latency_frames}f · ${(1000 * rt.latency_frames / sr).toFixed(2)} ms` : "—";
     $("#rt-info").textContent =
       `Running · ${rt.sample_rate || "—"} Hz · ${rt.buffer_size || "—"} frame buffer`;
     $("#system-headline").textContent = "Processing is live";
+    $("#system-subline").textContent =
+      `${rt.sample_rate || "—"} Hz · ${rt.buffer_size || "—"} frame buffer · ${rt.channels || 2} channels`;
     $("#system-state-dot").className = "large-status-dot ok";
     $("#rt-start").disabled = true;
     $("#rt-stop").disabled = false;
@@ -1112,11 +1372,12 @@ function renderMeters(rt) {
     dot.classList.remove("ok");
     $("#rt-info").textContent = "Stopped · start processing to hear your profile system-wide.";
     $("#system-headline").textContent = "Engine is stopped";
+    $("#system-subline").textContent = "Start the real-time engine to process system audio";
     $("#system-state-dot").className = "large-status-dot";
     $("#rt-start").disabled = false;
     $("#rt-stop").disabled = true;
-    $("#m-lufs").textContent = "— LUFS";
-    $("#m-lim").textContent = "—";
+    $("#m-lufs").innerHTML = '— <small>LUFS</small>';
+    $("#m-lim").innerHTML = '— <small>dB</small>';
     $("#m-peak").textContent = "— dBFS";
     drawOutputMeter(-70);
   }
@@ -1124,24 +1385,44 @@ function renderMeters(rt) {
 
 function drawOutputMeter(peakDb) {
   const c = $("#meter-canvas");
+  if (!c) return;
   const dpr = window.devicePixelRatio || 1;
   const rect = c.getBoundingClientRect();
-  c.width = rect.width * dpr; c.height = rect.height * dpr;
-  const ctx = c.getContext("2d"); ctx.scale(dpr, dpr);
+  if (rect.width < 4) return;
+  c.width = Math.round(rect.width * dpr);
+  c.height = Math.round(rect.height * dpr);
+  const ctx = c.getContext("2d");
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   const W = rect.width, H = rect.height;
-  ctx.fillStyle = "#1a1d26"; ctx.fillRect(0, 0, W, H);
-  const norm = clamp((peakDb + 60) / 60, 0, 1);
-  const grad = ctx.createLinearGradient(0, 0, W, 0);
-  grad.addColorStop(0, "#9ce3b1"); grad.addColorStop(0.75, "#efc477");
-  grad.addColorStop(0.95, "#fb8b9d");
-  ctx.fillStyle = grad;
-  ctx.fillRect(2, 3, (W - 4) * norm, H - 6);
-  // ticks
-  ctx.fillStyle = "rgba(255,255,255,.25)";
-  for (const t of [-48, -24, -12, -6, -1]) {
-    const x = 2 + (W - 4) * (t + 60) / 60;
-    ctx.fillRect(x, 0, 1, 4);
+
+  ctx.clearRect(0, 0, W, H);
+  ctx.fillStyle = "#05070a";
+  ctx.fillRect(0, 0, W, H);
+
+  // scale: −60 dBFS … 0 dBFS
+  const norm = (db) => clamp((db + 60) / 60, 0, 1);
+  const x = norm(peakDb) * W;
+
+  if (x > 0) {
+    const grad = ctx.createLinearGradient(0, 0, W, 0);
+    grad.addColorStop(0, "#3f9c78");
+    grad.addColorStop(.62, "#7ee2b8");
+    grad.addColorStop(.84, "#f2c879");
+    grad.addColorStop(1, "#ff8b9e");
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, x, H);
+    // soft head
+    ctx.fillStyle = "rgba(255,255,255,.75)";
+    ctx.fillRect(Math.max(0, x - 1.5), 0, 1.5, H);
   }
+
+  // ticks at musically useful marks
+  ctx.fillStyle = "rgba(255,255,255,.16)";
+  for (const t of [-48, -36, -24, -12, -6]) {
+    ctx.fillRect(Math.round(norm(t) * W), H - 3, 1, 3);
+  }
+  ctx.fillStyle = "rgba(255,139,158,.35)";
+  ctx.fillRect(Math.round(norm(-1) * W), 0, 1, H);
 }
 
 // ------------------------------------------------------------- events --
@@ -1180,7 +1461,7 @@ function selectAudioFile(file) {
 
 async function showHelp() {
   await modal("Studio shortcuts", [], {
-    eyebrow: "QUICK GUIDE", okText: "Got it",
+    eyebrow: "QUICK GUIDE", okText: "Got it", hideCancel: true,
     description: "Everything is available here in the GUI — no command line needed.",
     bodyHtml: `<div class="shortcut-list">
       <span>Save and activate the current profile</span><span><kbd>Ctrl</kbd> + <kbd>S</kbd></span>
@@ -1205,8 +1486,7 @@ async function refreshStatus() {
     $("#slot-b").title = "Slot B: " + st.slot_b;
     $("#slot-a-name").textContent = st.slot_a;
     $("#slot-b-name").textContent = st.slot_b;
-    $("#bypass-btn").classList.toggle("on", st.bypass);
-    $("#bypass-btn").setAttribute("aria-pressed", String(!!st.bypass));
+    setBypassLook(st.bypass);
     $("#auto-switch").checked = !!st.auto_switch;
     $("#auto-wire").checked = !!st.auto_wire;
     if (!S.currentId || (!S.dirty && st.active_profile !== S.currentId))
@@ -1217,10 +1497,18 @@ async function refreshStatus() {
   }
 }
 
+// Bypass is a passthrough state: dim the graph so nobody edits a curve that
+// is not being heard, and say so plainly in the canvas.
+function setBypassLook(on) {
+  document.body.classList.toggle("bypassed", !!on);
+  $("#bypass-btn").classList.toggle("on", !!on);
+  $("#bypass-btn").setAttribute("aria-pressed", String(!!on));
+}
+
 async function toggleBypass() {
   try {
     const r = await api.post("bypass", {});
-    $("#bypass-btn").classList.toggle("on", r.bypass);
+    setBypassLook(r.bypass);
     toast(r.bypass ? "Bypass ON — audio passthrough" : "Bypass off");
   } catch (e) { toast(String(e.message), true); }
 }
@@ -1249,8 +1537,13 @@ function init() {
   $("#revert-btn").addEventListener("click", () =>
     S.currentId && activateProfile(S.currentId, true));
   $("#new-profile").addEventListener("click", async () => {
-    const res = await modal("New profile",
-      [{ label: "id", value: "" }, { label: "name", value: "" }]);
+    const res = await modal("Create a new profile", [
+      { label: "id", title: "Profile ID", placeholder: "e.g. studio-headphones",
+        help: "Used for the file name: letters, digits, dot, dash or underscore." },
+      { label: "name", title: "Display name", placeholder: "e.g. Studio headphones",
+        help: "What the library and the top bar show." },
+    ], { eyebrow: "NEW PROFILE", okText: "Create profile",
+         description: "Start from a flat curve, then shape it by dragging bands on the graph." });
     if (!res || !res.id.trim()) return;
     const newId = res.id.trim();
     if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(newId)) {
@@ -1299,7 +1592,13 @@ function init() {
       document.querySelectorAll(".tab").forEach(x => x.classList.remove("active"));
       document.querySelectorAll(".tab-body").forEach(x => x.classList.remove("active"));
       t.classList.add("active");
+      t.setAttribute("aria-selected", "true");
+      document.querySelectorAll(".tab").forEach(x => {
+        if (x !== t) x.setAttribute("aria-selected", "false");
+      });
       $("#tab-" + t.dataset.tab).classList.add("active");
+      const label = t.querySelector(".tab-text strong");
+      if (label) $("#current-workspace").textContent = label.textContent;
       if (t.dataset.tab === "system") { loadDevices(); loadStreams(); loadSystemOverview(); }
     }));
   $("#auto-switch").addEventListener("change", async (e) => {
@@ -1346,6 +1645,7 @@ function init() {
     if (S.dirty) { e.preventDefault(); e.returnValue = ""; }
   });
   window.addEventListener("resize", () => { drawEQ(); drawMiniSpectrum(); });
+  window.addEventListener("scroll", hideTip, true);
 
   connectSSE();
   (async () => {

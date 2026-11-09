@@ -19,12 +19,22 @@ integration, measurement-grade analysis, and a control plane you can script.
 <table>
   <tr>
     <td width="50%">
-      <img src="demo/curve-music.svg" alt="The shipped Music profile drawn over the spectrum of analyzed content">
-      <sub><b>Analysis overlay</b> — a shipped profile drawn over the measured spectrum of your content.</sub>
+      <a href="demo/studio-profiles.jpg"><img src="demo/studio-profiles.jpg" alt="EQForge Audio Studio: profile library, interactive EQ curve and signal chain"></a>
+      <sub><b>Profiles</b> — searchable library, an interactive EQ curve and the post-processing chain.</sub>
     </td>
     <td width="50%">
-      <img src="demo/curve-suggest.svg" alt="Corrective EQ suggested automatically toward a Harman target curve">
-      <sub><b>Advisor output</b> — corrective EQ computed toward a Harman target, from real measurements.</sub>
+      <a href="demo/studio-analysis.jpg"><img src="demo/studio-analysis.jpg" alt="EQForge Analyze workspace showing loudness measurements over the EQ curve"></a>
+      <sub><b>Analyze</b> — loudness and spectrum measurements, advisor findings and target-matched EQ.</sub>
+    </td>
+  </tr>
+  <tr>
+    <td width="50%">
+      <a href="demo/studio-system.jpg"><img src="demo/studio-system.jpg" alt="EQForge System workspace: output routing, real-time engine and startup controls"></a>
+      <sub><b>System</b> — output routing, the real-time engine, startup services and diagnostics.</sub>
+    </td>
+    <td width="50%">
+      <img src="demo/curve-music.svg" alt="The shipped Music profile drawn over the spectrum of analyzed content">
+      <sub><b>Analysis overlay</b> — a shipped profile drawn over the measured spectrum of your content.</sub>
     </td>
   </tr>
 </table>
