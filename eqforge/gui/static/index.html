@@ -3,34 +3,41 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="theme-color" content="#0b0e13">
+<meta name="theme-color" content="#0a0c10">
+<meta name="color-scheme" content="dark">
 <title>EQForge · Audio Studio</title>
 <link rel="stylesheet" href="style.css">
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='9' fill='%2310151b'/%3E%3Cpath d='M4 20 C 9 20, 10 9, 16 9 S 23 20, 28 20' stroke='%239ce3b1' stroke-width='2.5' fill='none' stroke-linecap='round'/%3E%3C/svg%3E">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='9' fill='%230f1319'/%3E%3Cpath d='M6 21 C 11 21, 11 11, 16 11 S 21 21, 26 21' stroke='%237ee2b8' stroke-width='2.5' fill='none' stroke-linecap='round'/%3E%3C/svg%3E">
 </head>
 <body>
 <svg class="svg-defs" aria-hidden="true">
-  <symbol id="i-sliders" viewBox="0 0 24 24"><path d="M4 7h9m4 0h3M4 17h3m4 0h9M13 4v6M7 14v6"/></symbol>
-  <symbol id="i-wave" viewBox="0 0 24 24"><path d="M3 12h3l2-7 4 14 3-10 2 3h4"/></symbol>
-  <symbol id="i-grid" viewBox="0 0 24 24"><rect x="4" y="4" width="6" height="6" rx="1"/><rect x="14" y="4" width="6" height="6" rx="1"/><rect x="4" y="14" width="6" height="6" rx="1"/><rect x="14" y="14" width="6" height="6" rx="1"/></symbol>
-  <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
-  <symbol id="i-search" viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 4 4"/></symbol>
-  <symbol id="i-upload" viewBox="0 0 24 24"><path d="M12 16V4m-4 4 4-4 4 4M5 15v4h14v-4"/></symbol>
-  <symbol id="i-download" viewBox="0 0 24 24"><path d="M12 4v12m-4-4 4 4 4-4M5 19h14"/></symbol>
-  <symbol id="i-copy" viewBox="0 0 24 24"><rect x="8" y="8" width="11" height="12" rx="2"/><path d="M16 8V4H5v12h3"/></symbol>
-  <symbol id="i-trash" viewBox="0 0 24 24"><path d="M4 7h16M9 7V4h6v3m3 0-1 13H7L6 7m4 4v5m4-5v5"/></symbol>
-  <symbol id="i-play" viewBox="0 0 24 24"><path d="m8 5 11 7-11 7Z"/></symbol>
-  <symbol id="i-stop" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2"/></symbol>
-  <symbol id="i-link" viewBox="0 0 24 24"><path d="m9 15 6-6m-6 1-2 2a4 4 0 0 0 6 6l2-2m0-8 2-2a4 4 0 0 1 6 6l-2 2" transform="translate(-2 0)"/></symbol>
-  <symbol id="i-power" viewBox="0 0 24 24"><path d="M12 3v9m-5-7a8 8 0 1 0 10 0"/></symbol>
-  <symbol id="i-check" viewBox="0 0 24 24"><path d="m5 12 4 4L19 6"/></symbol>
-  <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M20 7v5h-5M4 17v-5h5m10-2a8 8 0 0 0-14-3m14 9a8 8 0 0 1-14 3"/></symbol>
-  <symbol id="i-help" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M9.5 9a2.5 2.5 0 1 1 4 2c-1 .7-1.5 1-1.5 2.5M12 17h.01"/></symbol>
+  <symbol id="i-sliders" viewBox="0 0 24 24"><path d="M5 8h9M18 8h1M5 16h3M12 16h7"/><circle cx="15.5" cy="8" r="2.1"/><circle cx="9.5" cy="16" r="2.1"/></symbol>
+  <symbol id="i-wave" viewBox="0 0 24 24"><path d="M3 12h2.5L8 5l4 14 3-11 2 4h4"/></symbol>
+  <symbol id="i-grid" viewBox="0 0 24 24"><rect x="4" y="4" width="7" height="7" rx="1.6"/><rect x="13" y="4" width="7" height="7" rx="1.6"/><rect x="4" y="13" width="7" height="7" rx="1.6"/><rect x="13" y="13" width="7" height="7" rx="1.6"/></symbol>
+  <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5.5v13M5.5 12h13"/></symbol>
+  <symbol id="i-search" viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m15.5 15.5 4.5 4.5"/></symbol>
+  <symbol id="i-upload" viewBox="0 0 24 24"><path d="M12 16.5V4m-4.5 4.5L12 4l4.5 4.5"/><path d="M4.5 15v3.5A1.5 1.5 0 0 0 6 20h12a1.5 1.5 0 0 0 1.5-1.5V15"/></symbol>
+  <symbol id="i-download" viewBox="0 0 24 24"><path d="M12 4v12.5m-4.5-4L12 17l4.5-4.5"/><path d="M4.5 18.5V20h15v-1.5"/></symbol>
+  <symbol id="i-copy" viewBox="0 0 24 24"><rect x="8.5" y="8.5" width="11" height="11.5" rx="2.2"/><path d="M15.5 8.5V5.5A1.5 1.5 0 0 0 14 4H6a1.5 1.5 0 0 0-1.5 1.5V15A1.5 1.5 0 0 0 6 16.5h2.5"/></symbol>
+  <symbol id="i-trash" viewBox="0 0 24 24"><path d="M4.5 7.5h15M9.5 7.5V4.5h5v3M7 7.5 8 20h8l1-12.5M10.5 11v5.5M13.5 11v5.5"/></symbol>
+  <symbol id="i-play" viewBox="0 0 24 24"><path d="m8.5 5.5 10 6.5-10 6.5Z"/></symbol>
+  <symbol id="i-stop" viewBox="0 0 24 24"><rect x="6.5" y="6.5" width="11" height="11" rx="2"/></symbol>
+  <symbol id="i-link" viewBox="0 0 24 24"><path d="M10 13.5a3.6 3.6 0 0 0 5.2 0l2.6-2.6a3.7 3.7 0 0 0-5.2-5.2l-1.4 1.4"/><path d="M14 10.5a3.6 3.6 0 0 0-5.2 0l-2.6 2.6a3.7 3.7 0 0 0 5.2 5.2l1.4-1.4"/></symbol>
+  <symbol id="i-power" viewBox="0 0 24 24"><path d="M12 3.5v8"/><path d="M7.2 6.4a7.2 7.2 0 1 0 9.6 0"/></symbol>
+  <symbol id="i-check" viewBox="0 0 24 24"><path d="m5 12.5 4.5 4.5L19 6.5"/></symbol>
+  <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M20 11.5a8 8 0 1 0-2.6 6.3"/><path d="M20 5.5v6h-6"/></symbol>
+  <symbol id="i-help" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M9.6 9.4a2.5 2.5 0 1 1 3.9 2.1c-.9.6-1.5 1-1.5 2.3M12 17h.01"/></symbol>
   <symbol id="i-menu" viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h16"/></symbol>
-  <symbol id="i-close" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></symbol>
-  <symbol id="i-chevron" viewBox="0 0 24 24"><path d="m8 10 4 4 4-4"/></symbol>
-  <symbol id="i-file" viewBox="0 0 24 24"><path d="M6 3h8l4 4v14H6Zm8 0v5h4M9 13h6m-6 4h4"/></symbol>
-  <symbol id="i-spark" viewBox="0 0 24 24"><path d="m12 3 1.5 5.5L19 10l-5.5 1.5L12 17l-1.5-5.5L5 10l5.5-1.5ZM19 16l.7 2.3L22 19l-2.3.7L19 22l-.7-2.3L16 19l2.3-.7Z"/></symbol>
+  <symbol id="i-close" viewBox="0 0 24 24"><path d="m6.5 6.5 11 11M17.5 6.5l-11 11"/></symbol>
+  <symbol id="i-chevron" viewBox="0 0 24 24"><path d="m8.5 10.5 3.5 3.5 3.5-3.5"/></symbol>
+  <symbol id="i-file" viewBox="0 0 24 24"><path d="M6.5 3.5h7l4 4v13h-11Z"/><path d="M13.5 3.5v4h4M9.5 13h5m-5 3.5h3.5"/></symbol>
+  <symbol id="i-spark" viewBox="0 0 24 24"><path d="m12 3.5 1.6 5.1L18.5 10l-4.9 1.5L12 16.5l-1.6-5L5.5 10l4.9-1.4Z"/><path d="m18.5 16 .7 2.2 2.3.8-2.3.8-.7 2.2-.7-2.2-2.3-.8 2.3-.8Z"/></symbol>
+  <symbol id="i-cpu" viewBox="0 0 24 24"><rect x="6.5" y="6.5" width="11" height="11" rx="2.2"/><path d="M10 3.5v3M14 3.5v3M10 17.5v3M14 17.5v3M3.5 10h3M3.5 14h3M17.5 10h3M17.5 14h3"/></symbol>
+  <symbol id="i-alert" viewBox="0 0 24 24"><path d="M12 4.5 21 20H3Z"/><path d="M12 10v4.5M12 17.2h.01"/></symbol>
+  <symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M12 11v5.5M12 8h.01"/></symbol>
+  <symbol id="i-terminal" viewBox="0 0 24 24"><rect x="3.5" y="5" width="17" height="14" rx="2.4"/><path d="m7.5 10 2.5 2-2.5 2M12.5 14.5h4"/></symbol>
+  <symbol id="i-target" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><circle cx="12" cy="12" r="4"/><circle cx="12" cy="12" r=".7" fill="currentColor" stroke="none"/></symbol>
+  <symbol id="i-lock" viewBox="0 0 24 24"><rect x="5.5" y="10.5" width="13" height="9" rx="2.2"/><path d="M8.5 10.5V8a3.5 3.5 0 0 1 7 0v2.5"/></symbol>
 </svg>
 
 <header id="topbar">
@@ -38,21 +45,29 @@
     <button id="menu-toggle" class="icon-btn mobile-only" aria-label="Open workspace"><svg><use href="#i-menu"/></svg></button>
     <div class="brand">
       <div class="brand-mark"><svg viewBox="0 0 32 32"><path d="M4 20 C 9 20, 10 9, 16 9 S 23 20, 28 20"/></svg></div>
-      <div><div class="brand-name">EQForge</div><div class="brand-caption">AUDIO STUDIO</div></div>
+      <div class="brand-text">
+        <div class="brand-name">EQForge</div>
+        <div class="brand-caption">Audio Studio</div>
+      </div>
     </div>
     <span class="brand-sub" id="engine-badge" title="DSP backend">Loading</span>
+    <span class="current-workspace" id="current-workspace">Profiles</span>
   </div>
 
   <div class="top-controls">
     <div class="active-profile-control">
-      <label for="profile-select">Active profile</label>
-      <div class="select-wrap"><select id="profile-select" title="Active profile"></select><svg><use href="#i-chevron"/></svg></div>
+      <label for="profile-select">Profile</label>
+      <div class="select-wrap">
+        <select id="profile-select" title="Active profile"></select>
+        <svg><use href="#i-chevron"/></svg>
+      </div>
     </div>
-    <div class="pill-group" id="slot-group" aria-label="A B comparison">
+    <div class="pill-group" id="slot-group" aria-label="A B comparison" role="group">
+      <span class="pill-label">Compare</span>
       <button id="slot-a" class="pill" title="Activate slot A"><span>A</span><small id="slot-a-name">—</small></button>
       <button id="slot-b" class="pill" title="Activate slot B"><span>B</span><small id="slot-b-name">—</small></button>
     </div>
-    <button id="bypass-btn" class="bypass-btn" title="Bypass all processing (Space)"><svg><use href="#i-power"/></svg><span>Bypass</span></button>
+    <button id="bypass-btn" class="bypass-btn" title="Bypass all processing (Space)" aria-pressed="false"><svg><use href="#i-power"/></svg><span>Bypass</span></button>
     <button id="help-btn" class="icon-btn" title="Keyboard shortcuts and help" aria-label="Help"><svg><use href="#i-help"/></svg></button>
   </div>
 </header>
@@ -60,20 +75,35 @@
 <main>
   <div id="sidebar-backdrop"></div>
   <aside id="sidebar">
-    <div class="workspace-label"><span>WORKSPACE</span><button id="sidebar-close" class="icon-btn mobile-only" aria-label="Close workspace"><svg><use href="#i-close"/></svg></button></div>
-    <nav class="tabs" aria-label="Workspace">
-      <button class="tab active" data-tab="profiles"><svg><use href="#i-sliders"/></svg><span>Profiles</span><small>Library</small></button>
-      <button class="tab" data-tab="analysis"><svg><use href="#i-wave"/></svg><span>Analyze</span><small>Measure & match</small></button>
-      <button class="tab" data-tab="system"><svg><use href="#i-grid"/></svg><span>System</span><small>Audio & startup</small></button>
+    <div class="workspace-label">
+      <span>Workspaces</span>
+      <button id="sidebar-close" class="icon-btn mobile-only" aria-label="Close workspace"><svg><use href="#i-close"/></svg></button>
+    </div>
+    <nav class="tabs" role="tablist" aria-label="Workspace">
+      <button class="tab active" data-tab="profiles" role="tab" aria-selected="true" aria-controls="tab-profiles">
+        <span class="tab-icon"><svg><use href="#i-sliders"/></svg></span>
+        <span class="tab-text"><strong>Profiles</strong><small>Library &amp; EQ shaping</small></span>
+        <svg class="tab-chevron"><use href="#i-chevron"/></svg>
+      </button>
+      <button class="tab" data-tab="analysis" role="tab" aria-selected="false" aria-controls="tab-analysis">
+        <span class="tab-icon"><svg><use href="#i-wave"/></svg></span>
+        <span class="tab-text"><strong>Analyze</strong><small>Measure &amp; match</small></span>
+        <svg class="tab-chevron"><use href="#i-chevron"/></svg>
+      </button>
+      <button class="tab" data-tab="system" role="tab" aria-selected="false" aria-controls="tab-system">
+        <span class="tab-icon"><svg><use href="#i-grid"/></svg></span>
+        <span class="tab-text"><strong>System</strong><small>Audio &amp; startup</small></span>
+        <svg class="tab-chevron"><use href="#i-chevron"/></svg>
+      </button>
     </nav>
 
-    <section id="tab-profiles" class="tab-body active">
+    <section id="tab-profiles" class="tab-body active" role="tabpanel">
       <div class="search-box"><svg><use href="#i-search"/></svg><input id="profile-search" type="search" placeholder="Search profiles…" aria-label="Search profiles"></div>
-      <div class="section-caption"><span>YOUR LIBRARY</span><span id="profile-count">0</span></div>
+      <div class="section-caption"><span>Your library</span><span id="profile-count">0</span></div>
       <div id="profile-list" class="list"><div class="loading-row"><span class="spinner"></span>Loading profiles…</div></div>
       <div class="sidebar-actions profile-create-actions">
         <button id="new-profile" class="btn primary"><svg><use href="#i-plus"/></svg>New profile</button>
-        <button id="import-btn" class="btn"><svg><use href="#i-upload"/></svg>Import</button>
+        <button id="import-btn" class="btn" title="Import EQForge, AutoEQ, REW, APO or CSV"><svg><use href="#i-upload"/></svg>Import</button>
         <input type="file" id="import-input" accept=".json,.txt,.csv,text/plain,application/json" hidden>
       </div>
       <div class="profile-tools">
@@ -83,8 +113,12 @@
       </div>
     </section>
 
-    <section id="tab-analysis" class="tab-body">
-      <div class="panel-intro"><span class="eyebrow">MEASUREMENT</span><h3>Understand your audio</h3><p>Measure loudness, inspect the spectrum and build a corrective EQ automatically.</p></div>
+    <section id="tab-analysis" class="tab-body" role="tabpanel">
+      <div class="panel-intro">
+        <span class="eyebrow">Measurement</span>
+        <h3>Understand your audio</h3>
+        <p>Measure loudness, inspect the spectrum and build a corrective EQ automatically.</p>
+      </div>
       <div class="file-drop" id="file-drop">
         <input type="file" id="file-input" accept="audio/*,.flac,.wav,.mp3,.ogg,.m4a,.aac,.opus" hidden>
         <div class="file-drop-icon"><svg><use href="#i-wave"/></svg></div>
@@ -97,49 +131,58 @@
       <button id="analyze-btn" class="btn primary full-width"><svg><use href="#i-wave"/></svg><span>Analyze audio</span></button>
       <div id="analysis-result" class="analysis-result"><div class="empty-state compact"><svg><use href="#i-wave"/></svg><p>Your measurements and smart recommendations will appear here.</p></div></div>
       <div id="suggest-controls" class="suggest-controls hidden">
-        <div class="section-caption"><span>CORRECTIVE EQ</span></div>
+        <div class="section-caption"><span>Corrective EQ</span></div>
         <label class="field-label" for="target-select">Target curve</label>
-        <select id="target-select"><option value="harman-overear">Harman over-ear</option><option value="flat">Flat</option><option value="broadcast">Broadcast</option></select>
-        <button id="suggest-btn" class="btn accent-secondary full-width"><svg><use href="#i-spark"/></svg>Generate & preview EQ</button>
+        <div class="select-wrap"><select id="target-select"><option value="harman-overear">Harman over-ear</option><option value="flat">Flat</option><option value="broadcast">Broadcast</option></select><svg><use href="#i-chevron"/></svg></div>
+        <button id="suggest-btn" class="btn accent-secondary full-width"><svg><use href="#i-spark"/></svg>Generate &amp; preview EQ</button>
         <p class="fine-print">Adds editable bands to the current profile. Save when you are happy with the result.</p>
       </div>
     </section>
 
-    <section id="tab-system" class="tab-body">
+    <section id="tab-system" class="tab-body" role="tabpanel">
       <div class="system-hero">
-        <div><span class="eyebrow">SYSTEM AUDIO</span><h3 id="system-headline">Checking engine…</h3></div>
+        <div>
+          <span class="eyebrow">System audio</span>
+          <h3 id="system-headline">Checking engine…</h3>
+          <span class="status-description" id="system-subline">Reading PipeWire and service state</span>
+        </div>
         <span id="system-state-dot" class="large-status-dot"></span>
       </div>
+
       <div class="sys-group">
-        <div class="sys-title"><h3>Output & routing</h3><span id="pw-mini-status" class="mini-badge">Checking</span></div>
+        <div class="sys-title"><h3>Output &amp; routing</h3><span id="pw-mini-status" class="mini-badge">Checking</span></div>
         <label class="field-label" for="device-select">Default output</label>
-        <select id="device-select"></select>
+        <div class="select-wrap"><select id="device-select"></select><svg><use href="#i-chevron"/></svg></div>
         <div id="device-info" class="muted field-help"></div>
-        <label class="switch-row"><span><strong>Device profiles</strong><small>Switch EQ with your output</small></span><input type="checkbox" id="auto-switch"><i></i></label>
+        <label class="switch-row"><span><strong>Device profiles</strong><small>Switch EQ with your output device</small></span><input type="checkbox" id="auto-switch"><i></i></label>
         <label class="switch-row"><span><strong>Auto-wire streams</strong><small>Keep apps routed through EQForge</small></span><input type="checkbox" id="auto-wire"><i></i></label>
       </div>
+
       <div class="sys-group">
-        <div class="sys-title"><h3>Real-time engine</h3><button id="rt-refresh" class="icon-btn tiny" title="Refresh system status"><svg><use href="#i-refresh"/></svg></button></div>
-        <div id="rt-info" class="muted">Checking…</div>
+        <div class="sys-title"><h3>Real-time engine</h3><button id="rt-refresh" class="icon-btn tiny" title="Refresh system status" aria-label="Refresh system status"><svg><use href="#i-refresh"/></svg></button></div>
+        <div id="rt-info" class="status-description">Checking…</div>
         <div class="button-grid two">
           <button id="rt-start" class="btn primary small"><svg><use href="#i-play"/></svg>Start</button>
           <button id="rt-stop" class="btn small"><svg><use href="#i-stop"/></svg>Stop</button>
         </div>
         <button id="rt-wire" class="btn small full-width"><svg><use href="#i-link"/></svg>Connect audio streams</button>
       </div>
+
       <div class="sys-group">
-        <h3>Startup & background</h3>
+        <div class="sys-title"><h3>Startup &amp; background</h3></div>
         <div id="autostart-info" class="status-description">Checking login services…</div>
         <button id="autostart-btn" class="btn small full-width">Enable login autostart</button>
         <div id="always-on-info" class="status-description">Checking first-sample routing…</div>
         <button id="always-on-btn" class="btn small full-width">Enable always-on routing</button>
-        <button id="setup-btn" class="btn ghost small full-width">Install / repair integration files</button>
+        <button id="setup-btn" class="btn ghost small full-width"><svg><use href="#i-terminal"/></svg>Install / repair integration files</button>
       </div>
+
       <div class="sys-group">
-        <div class="sys-title"><h3>Diagnostics</h3><button id="doctor-btn" class="btn small">Run doctor</button></div>
+        <div class="sys-title"><h3>Diagnostics</h3><button id="doctor-btn" class="btn small"><svg><use href="#i-check"/></svg>Run doctor</button></div>
         <div id="doctor-result" class="doctor-result"></div>
-        <button id="logs-btn" class="btn ghost small full-width">View recent engine logs</button>
+        <button id="logs-btn" class="btn ghost small full-width"><svg><use href="#i-file"/></svg>View recent engine logs</button>
       </div>
+
       <div class="sys-group last">
         <div class="sys-title"><h3>Application streams</h3><span id="stream-count" class="mini-badge">0</span></div>
         <div id="stream-list" class="muted small-list"><div class="empty-line">No active streams</div></div>
@@ -150,35 +193,75 @@
   <section id="content">
     <div id="eq-panel" class="studio-card">
       <div class="panel-header">
-        <div class="profile-heading"><span class="eyebrow">LIVE PROFILE <i id="dirty-dot"></i></span><h1 id="profile-title">Loading profile…</h1><p id="profile-description">Shape your sound with a precise, real-time processing chain.</p></div>
+        <div class="profile-heading">
+          <span class="eyebrow"><span class="live-dot"></span>Live profile <i id="dirty-dot"></i></span>
+          <h1 id="profile-title">Loading profile…</h1>
+          <p id="profile-description">Shape your sound with a precise, real-time processing chain.</p>
+        </div>
         <div class="panel-actions">
-          <span id="dirty-flag" class="dirty">Unsaved</span>
+          <span id="dirty-flag" class="dirty">Unsaved changes</span>
           <button id="revert-btn" class="btn small ghost">Revert</button>
           <button id="saveas-btn" class="btn small">Save as…</button>
-          <button id="save-btn" class="btn small primary"><svg><use href="#i-check"/></svg>Save & activate</button>
+          <button id="save-btn" class="btn small primary"><svg><use href="#i-check"/></svg>Save &amp; activate</button>
         </div>
       </div>
+
       <div class="eq-toolbar">
-        <div class="eq-toolbar-left"><button id="add-band-btn" class="btn small"><svg><use href="#i-plus"/></svg>Add band</button><span id="band-count" class="mini-badge">0 bands</span></div>
-        <div class="view-options"><label><input type="checkbox" id="show-ghosts" checked><span>Band curves</span></label><label><input type="checkbox" id="show-spectrum" checked><span>Spectrum</span></label><span class="zoom-label">Range</span><select id="gain-range"><option value="auto">Auto</option><option value="12">±12 dB</option><option value="18">±18 dB</option><option value="24">±24 dB</option></select></div>
+        <div class="eq-toolbar-left">
+          <button id="add-band-btn" class="btn small"><svg><use href="#i-plus"/></svg>Add band</button>
+          <span id="band-count" class="mini-badge">0 bands</span>
+        </div>
+        <div class="view-options">
+          <label class="check-chip"><input type="checkbox" id="show-ghosts" checked><span>Band curves</span></label>
+          <label class="check-chip"><input type="checkbox" id="show-spectrum" checked><span>Spectrum</span></label>
+          <span class="zoom-label">Range</span>
+          <div class="select-wrap compact"><select id="gain-range"><option value="auto">Auto</option><option value="12">±12 dB</option><option value="18">±18 dB</option><option value="24">±24 dB</option></select><svg><use href="#i-chevron"/></svg></div>
+        </div>
       </div>
-      <div class="canvas-wrap"><canvas id="eq-canvas" height="360" aria-label="Interactive equalizer response"></canvas><div class="canvas-badge">20 Hz — 20 kHz</div></div>
-      <div class="eq-footer"><div class="legend"><span class="legend-total">Total response</span><span class="legend-band">Individual bands</span><span class="legend-spectrum">Measured spectrum</span></div><div class="eq-hints muted">Drag to shape · Scroll for Q · Double-click to add · <kbd>Del</kbd> to remove</div></div>
+
+      <div class="canvas-wrap">
+        <canvas id="eq-canvas" height="360" aria-label="Interactive equalizer response"></canvas>
+        <div class="canvas-badge">20 Hz — 20 kHz</div>
+      </div>
+
+      <div class="eq-footer">
+        <div class="legend">
+          <span class="legend-total">Total response</span>
+          <span class="legend-band">Individual bands</span>
+          <span class="legend-spectrum">Measured spectrum</span>
+        </div>
+        <div class="eq-hints muted">Drag to shape · Scroll for Q · Double-click to add · <kbd>Del</kbd> to remove</div>
+      </div>
     </div>
 
     <div id="lower-panels">
       <section id="bands-panel" class="studio-card">
-        <div class="subpanel-header"><div><span class="eyebrow">EQUALIZER</span><h2>Filter bands</h2></div><span class="fine-print">Values update the preview instantly</span></div>
-        <div class="table-scroll"><table id="band-table"><thead><tr><th>#</th><th>Type</th><th>Frequency <small>Hz</small></th><th>Gain <small>dB</small></th><th>Q</th><th>On</th><th></th></tr></thead><tbody></tbody></table></div>
+        <div class="subpanel-header">
+          <div><span class="eyebrow">Equalizer</span><h2>Filter bands</h2></div>
+          <span class="fine-print">Live preview</span>
+        </div>
+        <div class="table-scroll">
+          <table id="band-table">
+            <thead><tr><th class="col-num">#</th><th class="col-type">Type</th><th>Frequency <small>Hz</small></th><th>Gain <small>dB</small></th><th>Q</th><th class="col-on">On</th><th class="col-del"></th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
       </section>
       <section id="chain-panel" class="studio-card">
-        <div class="subpanel-header"><div><span class="eyebrow">POST PROCESSING</span><h2>Signal chain</h2></div><span class="fine-print">Click a stage to toggle it</span></div>
+        <div class="subpanel-header">
+          <div><span class="eyebrow">Post processing</span><h2>Signal chain</h2></div>
+          <span class="fine-print">Click to toggle</span>
+        </div>
         <div class="chain-strip" id="chain-strip"></div>
       </section>
     </div>
 
-    <footer id="meter-bar">
-      <div class="engine-state"><span id="dot-daemon" class="dot" title="Daemon"></span><span>Control</span><span id="dot-rt" class="dot" title="Real-time engine"></span><span>Engine</span><span id="dot-pw" class="dot" title="PipeWire"></span><span>PipeWire</span></div>
+    <footer id="meter-bar" aria-label="Live meters">
+      <div class="engine-state">
+        <span id="dot-daemon" class="dot" title="Daemon"></span><span>Control</span>
+        <span id="dot-rt" class="dot" title="Real-time engine"></span><span>Engine</span>
+        <span id="dot-pw" class="dot" title="PipeWire"></span><span>PipeWire</span>
+      </div>
       <div class="meter-block"><div class="meter-label">Momentary</div><div class="meter-value" id="m-lufs">— <small>LUFS</small></div></div>
       <div class="meter-block grow"><div class="meter-label"><span>Output peak</span><span id="m-peak">— dBFS</span></div><canvas id="meter-canvas" height="18"></canvas></div>
       <div class="meter-block"><div class="meter-label">Limiter</div><div class="meter-value" id="m-lim">0.0 <small>dB</small></div></div>

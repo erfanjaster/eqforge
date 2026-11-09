@@ -5,6 +5,35 @@ All notable changes to EQForge. Versions follow the package version in
 
 ## Unreleased — terminal-free Audio Studio
 
+### Changed
+
+* **Audio Studio visual redesign.** The interface was rebuilt on a single
+  design-token system (surfaces, lines, type scale, radii, spacing) instead of
+  per-widget values, with a clearer hierarchy: a compact header, workspace
+  navigation with icons and descriptions, one prominent EQ surface and two
+  supporting cards. Every string is now sized for reading (11–13 px body copy
+  instead of 8–10 px), and contrast was raised across labels, tables and the
+  System panel.
+* **The EQ graph is a real instrument.** Redrawn with a soft grid, octave
+  labels that stay inside the plot, a gradient response area, a glow on the
+  total curve, dashed selection guides, and band handles that no longer pile
+  up when AutoEQ imports cluster bands. Hovering shows a precise read-out
+  (frequency, gain and Q for bands; frequency and gain elsewhere), and the
+  measured spectrum is drawn with an octave reference.
+* **Signal chain stages read as stages.** Each stage shows its name and
+  labelled parameter fields (Ceiling, Look-ahead, Threshold, Ratio…), the
+  preamp shows the automatic value it is applying, and the enabled state is
+  legible at a glance.
+* **Bypass is visible.** Bypassing dims the response and states it on the
+  graph, so nobody edits a curve that is not being heard.
+* **Dialogs explain themselves.** Save-as, duplicate, new-profile and delete
+  dialogs have proper field labels, hints, sensible pre-filled values, a single
+  clear action, and destructive actions are marked as such. Informational
+  dialogs (shortcuts, logs) no longer offer a misleading Cancel.
+* **Responsive layout.** Drawer navigation under 900 px with the current
+  workspace named in the header, a two-row meter strip on tablets, and a band
+  table that fits a 390 px phone without sideways scrolling.
+
 ### Added
 
 * A redesigned, responsive GUI with a searchable profile library, clearer EQ

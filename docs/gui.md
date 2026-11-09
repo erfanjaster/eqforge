@@ -20,6 +20,8 @@ services. Profiles and audio stay on your computer.
 
 ## Audio Studio
 
+![Profiles workspace](../demo/studio-profiles.jpg)
+
 The dark, responsive studio is organized into three workspaces:
 
 - **Profiles** — searchable preset/custom library, profile activation, A/B
@@ -103,6 +105,28 @@ shell commands:
 Unavailable optional components are reported as readable warnings rather
 than fake success states. An error from the real-time host includes its
 actionable diagnostic hint in the GUI.
+
+## Interface conventions
+
+The studio is built on one set of design tokens (surfaces, lines, type scale,
+radii), so a control looks the same wherever it appears. A few habits are worth
+knowing:
+
+- **The graph is the main control.** Band handles can be dragged; hovering
+  shows the exact frequency, gain and Q under the pointer, and the selected
+  band gets crossing guides plus a highlighted row in the table.
+- **Nothing is hidden behind a click.** Each workspace is one flat panel, and
+  every state that changes what you hear is shown — *Unsaved changes* in amber,
+  a *Bypass active* badge over the dimmed curve, live meters in the footer.
+- **Dialogs state the consequence.** Save-as, duplicate, new and delete are
+  titled with the action, group fields under real labels with hints, and mark
+  destructive buttons in red. Informational dialogs offer a single close
+  action.
+- **Small screens get a drawer.** Under 900 px the workspace list slides in
+  from the left; the header names the workspace you are in. The band table and
+  signal chain stay usable down to a 390 px phone.
+
+![Analyze workspace](../demo/studio-analysis.jpg)
 
 ## Meters and shortcuts
 
