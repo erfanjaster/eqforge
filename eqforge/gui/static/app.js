@@ -6,7 +6,7 @@ const api = {
   async get(method) {
     const r = await fetch("/api/" + method);
     const j = await r.json();
-    if (!j.ok) throw new Error(j.error || "request failed");
+    if (!j.ok) throw new Error((j.error || "Request failed") + (j.hint ? ` — ${j.hint}` : ""));
     return j.result;
   },
   async post(method, params) {
@@ -16,7 +16,7 @@ const api = {
       body: JSON.stringify(params || {}),
     });
     const j = await r.json();
-    if (!j.ok) throw new Error(j.error || "request failed");
+    if (!j.ok) throw new Error((j.error || "Request failed") + (j.hint ? ` — ${j.hint}` : ""));
     return j.result;
   },
 };
@@ -30,8 +30,14 @@ const S = {
   selectedBand: -1,
   status: null,
   spectrum: null,      // {freqs, db} overlay from analysis
+  analysis: null,
+  selectedFile: null,
+  system: null,
   rt: null,
   hoverBand: -1,
+  showGhosts: true,
+  showSpectrum: true,
+  busy: false,
 };
 
 const FILTER_TYPES = ["peak", "lowshelf", "highshelf", "lowpass", "highpass",
@@ -110,12 +116,44 @@ const $ = (sel) => document.querySelector(sel);
 const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
 const db2lin = (db) => Math.pow(10, db / 20);
 
+function setBusy(value, text = "Working…") {
+  S.busy = value;
+  $("#busy-text").textContent = text;
+  $("#busy-overlay").classList.toggle("hidden", !value);
+}
+
+async function withButton(button, work, label = "Working…") {
+  if (!button || button.disabled) return;
+  const old = button.innerHTML;
+  button.disabled = true;
+  button.innerHTML = `<span class="spinner"></span>${esc(label)}`;
+  try { return await work(); }
+  finally {
+    button.disabled = false;
+    // System actions may replace their own caption to reflect the new state.
+    if (button.querySelector(".spinner")) button.innerHTML = old;
+  }
+}
+
+function formatBytes(bytes) {
+  if (!Number.isFinite(bytes)) return "";
+  const units = ["B", "KB", "MB", "GB"];
+  let n = bytes, i = 0;
+  while (n >= 1024 && i < units.length - 1) { n /= 1024; i++; }
+  return `${n.toFixed(i > 1 ? 1 : 0)} ${units[i]}`;
+}
+
+function closeSidebar() { document.body.classList.remove("sidebar-open"); }
+
 function toast(msg, isError) {
   const el = document.createElement("div");
   el.className = "toast" + (isError ? " error" : "");
   el.textContent = msg;
   $("#toast-area").appendChild(el);
-  setTimeout(() => el.remove(), isError ? 6000 : 3200);
+  setTimeout(() => {
+    el.classList.add("leaving");
+    setTimeout(() => el.remove(), 220);
+  }, isError ? 6500 : 3600);
 }
 
 function autoPreamp(filters) {
@@ -140,6 +178,8 @@ function currentDsp() {
 function markDirty(v = true) {
   S.dirty = v;
   $("#dirty-flag").classList.toggle("visible", v);
+  $("#dirty-dot").classList.toggle("visible", v);
+  $("#revert-btn").disabled = !v;
 }
 
 // --------------------------------------------------------- eq canvas --
@@ -195,7 +235,10 @@ function drawEQ() {
   const curve = computeCurve(filters, preamp, freqs);
   let peak = 0;
   for (const v of curve) peak = Math.max(peak, Math.abs(v));
-  GAIN_RANGE = clamp(Math.ceil((peak + 2) / 6) * 6, 12, 30);
+  const requestedRange = $("#gain-range") ? $("#gain-range").value : "auto";
+  GAIN_RANGE = requestedRange === "auto"
+    ? clamp(Math.ceil((peak + 2) / 6) * 6, 12, 30)
+    : parseInt(requestedRange, 10);
   const ymax = GAIN_RANGE;
 
   ctx.clearRect(0, 0, W, H);
@@ -203,10 +246,10 @@ function drawEQ() {
   // grid
   ctx.font = "10px Inter, sans-serif";
   ctx.textAlign = "center";
-  for (const dec of [1, 2]) {
+  for (const dec of [1, 2, 3, 4]) {
     for (const m of [1, 2, 5]) {
       const f = m * Math.pow(10, dec);
-      if (f > FMAX) continue;
+      if (f > FMAX || f < FMIN) continue;
       const x = freqToX(f, W, padL, padR);
       ctx.strokeStyle = "#22252f"; ctx.beginPath();
       ctx.moveTo(x, padT); ctx.lineTo(x, H - padB); ctx.stroke();
@@ -225,7 +268,7 @@ function drawEQ() {
   }
 
   // spectrum overlay
-  if (S.spectrum && S.spectrum.freqs && S.spectrum.freqs.length > 4) {
+  if (S.showSpectrum && S.spectrum && S.spectrum.freqs && S.spectrum.freqs.length > 4) {
     const sf = S.spectrum.freqs, sd = S.spectrum.db;
     let lo = 250, hi = 8000, acc = [], cnt = 0;
     for (let i = 0; i < sf.length; i++)
@@ -246,13 +289,13 @@ function drawEQ() {
   }
 
   // per-band ghosts
-  for (let i = 0; i < filters.length; i++) {
+  if (S.showGhosts) for (let i = 0; i < filters.length; i++) {
     const f = filters[i];
     if (f.enabled === false) continue;
     const d = designBiquad(f.type || "peak", f.freq, f.gain_db || 0,
                            f.q || 1, SR_VIEW, f.use_q);
-    ctx.strokeStyle = i === S.selectedBand ? "rgba(122,162,247,.85)"
-                                             : "rgba(122,162,247,.35)";
+    ctx.strokeStyle = i === S.selectedBand ? "rgba(139,174,248,.85)"
+                                             : "rgba(139,174,248,.35)";
     ctx.lineWidth = i === S.selectedBand ? 1.8 : 1.2;
     ctx.beginPath();
     for (let k = 0; k < freqs.length; k++) {
@@ -271,11 +314,11 @@ function drawEQ() {
     const y = dbToY(curve[i], H, padT, padB, ymax);
     i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
   }
-  ctx.strokeStyle = "#9ece6a"; ctx.lineWidth = 2.5; ctx.stroke();
+  ctx.strokeStyle = "#9ce3b1"; ctx.lineWidth = 2.5; ctx.stroke();
   ctx.lineTo(freqToX(FMAX, W, padL, padR), dbToY(0, H, padT, padB, ymax));
   ctx.lineTo(freqToX(FMIN, W, padL, padR), dbToY(0, H, padT, padB, ymax));
   ctx.closePath();
-  ctx.fillStyle = "rgba(158,206,106,.07)"; ctx.fill();
+  ctx.fillStyle = "rgba(156,227,177,.07)"; ctx.fill();
   ctx.lineWidth = 1;
 
   // band handles
@@ -287,7 +330,7 @@ function drawEQ() {
     const sel = i === S.selectedBand, hov = i === S.hoverBand;
     ctx.beginPath();
     ctx.arc(x, y, sel || hov ? 8 : 6, 0, Math.PI * 2);
-    ctx.fillStyle = sel ? "#7aa2f7" : (hov ? "#5d7fc4" : "#31415f");
+    ctx.fillStyle = sel ? "#8baef8" : (hov ? "#5d7fc4" : "#31415f");
     ctx.fill();
     ctx.strokeStyle = "#cdd6f4"; ctx.stroke();
     ctx.fillStyle = "#e8eaf2";
@@ -369,34 +412,44 @@ function initEQInteraction() {
     const mx = e.clientX - r.left, my = e.clientY - r.top;
     if (bandAt(mx, my) >= 0) return;
     const { W, H, padL, padR, padT, padB } = geom();
-    const filters = currentFilters();
-    filters.push({
-      type: "peak",
-      freq: Math.round(xToFreq(mx, W, padL, padR)),
-      gain_db: Math.round(yToDb(my, H, padT, padB, GAIN_RANGE) * 10) / 10,
-      q: 1.0, enabled: true,
-    });
-    S.selectedBand = filters.length - 1;
-    markDirty(); renderBands(); drawEQ(); updatePreamp();
+    addBand(xToFreq(mx, W, padL, padR),
+            Math.round(yToDb(my, H, padT, padB, GAIN_RANGE) * 10) / 10);
   });
   window.addEventListener("keydown", (e) => {
-    if (e.key === "Delete" && S.selectedBand >= 0 &&
-        document.activeElement.tagName !== "INPUT") {
+    const editing = ["INPUT", "TEXTAREA", "SELECT"].includes(document.activeElement.tagName) ||
+      document.activeElement.isContentEditable;
+    if (e.key === "Delete" && S.selectedBand >= 0 && !editing) {
       currentFilters().splice(S.selectedBand, 1);
       S.selectedBand = -1;
       markDirty(); renderBands(); drawEQ(); updatePreamp();
     }
-    if (e.key === " " && document.activeElement.tagName !== "INPUT") {
+    if (e.key === " " && !editing && document.activeElement.tagName !== "BUTTON") {
       e.preventDefault(); toggleBypass();
     }
   });
 }
 
 // ----------------------------------------------------------- band table --
+function addBand(freq = 1000, gain = 0) {
+  const filters = currentFilters();
+  if (!S.resolved) return;
+  if (filters.length >= 64) { toast("A profile can contain at most 64 bands", true); return; }
+  filters.push({ type: "peak", freq: Math.round(freq), gain_db: gain,
+                 q: 1.0, enabled: true });
+  S.selectedBand = filters.length - 1;
+  markDirty(); renderBands(); drawEQ(); updatePreamp();
+  const selected = $("#band-table tr.selected");
+  if (selected) selected.scrollIntoView({ block: "nearest" });
+}
+
 function renderBands() {
   const tbody = $("#band-table tbody");
   tbody.innerHTML = "";
   const filters = currentFilters();
+  $("#band-count").textContent = `${filters.length} band${filters.length === 1 ? "" : "s"}`;
+  if (!filters.length) {
+    tbody.innerHTML = '<tr><td colspan="7" class="band-empty">No bands yet — double-click the curve or use Add band.</td></tr>';
+  }
   filters.forEach((f, i) => {
     const tr = document.createElement("tr");
     tr.className = i === S.selectedBand ? "selected" : "";
@@ -413,7 +466,7 @@ function renderBands() {
            step="0.01" value="${f.q || 1}"></td>
       <td><input type="checkbox" data-i="${i}" data-k="enabled"
            ${f.enabled !== false ? "checked" : ""}></td>
-      <td><button class="btn small ghost" data-del="${i}" title="remove">✕</button></td>`;
+      <td><button class="delete-band" data-del="${i}" title="Remove band" aria-label="Remove band ${i + 1}">×</button></td>`;
     tr.addEventListener("click", (e) => {
       if (e.target.tagName !== "INPUT" && e.target.tagName !== "SELECT" &&
           e.target.tagName !== "BUTTON") {
@@ -482,12 +535,12 @@ function renderChain() {
     S.resolved.preamp = { ...(S.resolved.preamp || {}), mode: e.target.value };
     if (e.target.value === "manual")
       S.resolved.preamp.gain_db = parseFloat(chip.querySelector("#preamp-gain").value) || 0;
-    markDirty(); updatePreamp(); renderChain();
+    markDirty(); updatePreamp(); drawEQ(); renderChain();
   });
   chip.querySelector("#preamp-gain").addEventListener("change", (e) => {
     S.resolved.preamp = { ...(S.resolved.preamp || {}), mode: "manual",
                           gain_db: parseFloat(e.target.value) || 0 };
-    markDirty(); updatePreamp();
+    markDirty(); updatePreamp(); drawEQ();
   });
 
   for (const st of stages) {
@@ -537,19 +590,30 @@ async function loadProfiles() {
   select.innerHTML = "";
   list.innerHTML = "";
   const q = ($("#profile-search").value || "").toLowerCase();
+  let shown = 0;
   for (const p of S.profiles) {
+    const tags = p.tags || [];
     const opt = document.createElement("option");
     opt.value = p.id; opt.textContent = p.name;
     if (p.id === S.currentId) opt.selected = true;
     select.appendChild(opt);
-    if (q && !(p.name + p.id + p.tags.join()).toLowerCase().includes(q)) continue;
+    if (q && !(p.name + p.id + tags.join()).toLowerCase().includes(q)) continue;
+    shown++;
     const item = document.createElement("div");
     item.className = "profile-item" + (p.id === S.currentId ? " selected" : "");
+    item.setAttribute("role", "button");
+    item.tabIndex = 0;
     item.innerHTML = `<div class="pname">${esc(p.name)}</div>
-      <div class="pmeta">${p.builtin ? "builtin" : "user"}${p.tags.length ? " · " + esc(p.tags.slice(0, 3).join(", ")) : ""}</div>`;
+      <div class="pmeta"><span class="origin-badge">${p.builtin ? "Preset" : "Custom"}</span>${tags.length ? " · " + esc(tags.slice(0, 2).join(", ")) : ""}</div>
+      ${p.id === S.currentId ? '<svg class="active-check"><use href="#i-check"/></svg>' : ""}`;
     item.addEventListener("click", () => activateProfile(p.id));
+    item.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); activateProfile(p.id); }
+    });
     list.appendChild(item);
   }
+  $("#profile-count").textContent = q ? `${shown}/${S.profiles.length}` : S.profiles.length;
+  if (!shown) list.innerHTML = '<div class="empty-state compact"><p>No profiles match your search.</p></div>';
 }
 
 function esc(s) {
@@ -567,13 +631,14 @@ async function activateProfile(id, force) {
     S.selectedBand = -1;
     S.dirty = false;
     markDirty(false);
-    $("#profile-title").textContent =
-      (S.resolved.name || id) + (S.resolved.builtin ? "  (builtin)" : "");
+    $("#profile-title").textContent = S.resolved.name || id;
+    const meta = S.profiles.find(p => p.id === id) || {};
+    $("#profile-description").textContent = S.resolved.description ||
+      `${meta.builtin ? "Factory preset" : "Custom profile"} · ${currentFilters().length} EQ bands · ready to shape`;
     $("#profile-select").value = id;
-    document.querySelectorAll(".profile-item").forEach((el, i) =>
-      el.classList.toggle("selected", false));
-    await loadProfiles();
+    closeSidebar();
     renderBands(); renderChain(); drawEQ(); updatePreamp();
+    await loadProfiles();
     const st = await api.get("status");
     if (st.active_profile !== id) {
       await api.post("set_profile", { profile: id });
@@ -596,55 +661,171 @@ async function saveProfile(saveAs) {
     if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(id)) {
       toast("Invalid id (letters, digits, . _ -)", true); return;
     }
+    if (!name) { toast("Enter a display name", true); return; }
+    if (S.profiles.some(p => p.id === id)) {
+      toast(`A profile named “${id}” already exists — choose another ID`, true); return;
+    }
   }
   const prof = { ...JSON.parse(JSON.stringify(r)), id, name, builtin: false };
   delete prof.exported_from; delete prof.exported_at;
   try {
-    await api.post("save_profile", { profile: prof });
+    const saved = await api.post("save_profile", { profile: prof });
     await api.post("set_profile", { profile: id });
-    toast("Saved " + id);
+    toast("Saved and activated “" + name + "”");
+    if (saved.warnings && saved.warnings.length)
+      toast(saved.warnings.join(" · "), true);
     await loadProfiles();
     await activateProfile(id, true);
   } catch (e) { toast(String(e.message), true); }
 }
 
-function modal(title, fields) {
+function modal(title, fields = [], options = {}) {
   return new Promise((resolve) => {
     const back = $("#modal-backdrop");
     $("#modal-title").textContent = title;
+    $("#modal-eyebrow").textContent = options.eyebrow || "EQFORGE";
     const body = $("#modal-body");
-    body.innerHTML = "";
+    body.innerHTML = (options.description ? `<p>${esc(options.description)}</p>` : "") + (options.bodyHtml || "");
     const inputs = [];
     for (const f of fields) {
+      const wrap = document.createElement("div");
+      wrap.className = "modal-field";
+      const label = document.createElement("label");
+      label.textContent = f.title || f.label;
       const inp = document.createElement("input");
-      inp.placeholder = f.label; inp.value = f.value || "";
-      body.appendChild(inp); inputs.push([f.label, inp]);
+      inp.name = f.label; inp.placeholder = f.placeholder || f.label;
+      inp.value = f.value ?? ""; inp.type = f.type || "text";
+      if (f.required) inp.required = true;
+      label.htmlFor = inp.id = `modal-field-${f.label}`;
+      wrap.append(label, inp);
+      if (f.help) { const small = document.createElement("small"); small.className = "fine-print"; small.textContent = f.help; wrap.appendChild(small); }
+      body.appendChild(wrap); inputs.push([f.label, inp]);
     }
+    const ok = $("#modal-ok");
+    ok.textContent = options.okText || "Confirm";
+    ok.classList.toggle("danger", !!options.danger);
+    ok.classList.toggle("primary", !options.danger);
     back.classList.remove("hidden");
     inputs[0] && inputs[0][1].focus();
     const done = (val) => {
       back.classList.add("hidden");
-      $("#modal-ok").onclick = null; $("#modal-cancel").onclick = null;
+      ok.onclick = null; $("#modal-cancel").onclick = null; $("#modal-close").onclick = null;
+      back.onclick = null; document.removeEventListener("keydown", onKey);
       resolve(val);
     };
-    $("#modal-ok").onclick = () => done(Object.fromEntries(
-      inputs.map(([k, i]) => [k, i.value])));
+    const onKey = (e) => {
+      if (e.key === "Escape") done(null);
+      if (e.key === "Enter" && e.target.tagName === "INPUT") ok.click();
+    };
+    ok.onclick = () => done(Object.fromEntries(inputs.map(([k, i]) => [k, i.value])));
     $("#modal-cancel").onclick = () => done(null);
+    $("#modal-close").onclick = () => done(null);
+    back.onclick = (e) => { if (e.target === back) done(null); };
+    document.addEventListener("keydown", onKey);
   });
+}
+
+// ---------------------------------------------------- profile file tools --
+async function importProfileFile(file) {
+  if (!file) return;
+  const button = $("#import-btn");
+  await withButton(button, async () => {
+    try {
+      const content = await file.text();
+      const r = await api.post("import_profile", { filename: file.name, content });
+      await loadProfiles();
+      await activateProfile(r.id, true);
+      toast(`Imported ${r.filters} bands as “${r.name}”`);
+    } catch (e) { toast(e.message, true); }
+  }, "Importing…");
+}
+
+async function exportCurrentProfile() {
+  if (!S.currentId) return;
+  try {
+    const r = await api.post("export_profile", { profile: S.currentId });
+    const blob = new Blob([r.content], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url; link.download = r.filename;
+    document.body.appendChild(link); link.click(); link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    toast(`Exported ${r.filename}`);
+  } catch (e) { toast(e.message, true); }
+}
+
+async function duplicateCurrentProfile() {
+  if (!S.resolved) return;
+  const res = await modal("Duplicate profile", [
+    { label: "id", title: "New profile ID", value: `${S.currentId}-copy` },
+    { label: "name", title: "Display name", value: `${S.resolved.name || S.currentId} (copy)` },
+  ], { description: "Create an independent, fully editable copy.", okText: "Create copy" });
+  if (!res) return;
+  const id = res.id.trim(), name = res.name.trim();
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(id) || !name) {
+    toast("Enter a name and a valid ID (letters, digits, . _ -)", true); return;
+  }
+  if (S.profiles.some(p => p.id === id)) {
+    toast(`A profile named “${id}” already exists — choose another ID`, true); return;
+  }
+  const prof = { ...JSON.parse(JSON.stringify(S.resolved)), id, name, builtin: false };
+  delete prof.exported_from; delete prof.exported_at; delete prof.extends;
+  try {
+    await api.post("save_profile", { profile: prof });
+    await loadProfiles(); await activateProfile(id, true);
+    toast(`Created “${name}”`);
+  } catch (e) { toast(e.message, true); }
+}
+
+async function deleteCurrentProfile() {
+  if (!S.currentId) return;
+  const current = S.profiles.find(p => p.id === S.currentId);
+  if (current && current.builtin) { toast("Factory presets are read-only. Duplicate one to customize it.", true); return; }
+  const name = (S.resolved || {}).name || S.currentId;
+  const res = await modal("Delete this profile?", [], {
+    description: `“${name}” will be removed from your library. This cannot be undone.`,
+    okText: "Delete profile", danger: true, eyebrow: "DANGER ZONE",
+  });
+  if (!res) return;
+  try {
+    const r = await api.post("delete_profile", { profile: S.currentId });
+    S.currentId = null; S.resolved = null; S.dirty = false;
+    await loadProfiles(); await activateProfile(r.active_profile || "flat", true);
+    toast(`Deleted “${name}”`);
+  } catch (e) { toast(e.message, true); }
 }
 
 // ---------------------------------------------------------- analysis --
 async function analyzeFile() {
   const path = $("#file-path").value.trim();
-  if (!path) { toast("Enter an audio file path", true); return; }
+  if (!S.selectedFile && !path) { toast("Choose an audio file or enter a path first", true); return; }
   const box = $("#analysis-result");
-  box.innerHTML = '<div class="muted">analyzing…</div>';
-  try {
-    const r = await api.post("analyze_file", { path });
-    renderAnalysis(r);
-  } catch (e) {
-    box.innerHTML = `<div class="finding warn"><div class="fmsg">${esc(e.message)}</div></div>`;
-  }
+  box.innerHTML = '<div class="loading-row"><span class="spinner"></span>Measuring loudness and spectrum…</div>';
+  $("#suggest-controls").classList.add("hidden");
+  await withButton($("#analyze-btn"), async () => {
+    try {
+      let r;
+      if (S.selectedFile) {
+        if (S.selectedFile.size > 128 * 1024 * 1024) throw new Error("Audio uploads are limited to 128 MB");
+        const dataUrl = await new Promise((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(reader.result);
+          reader.onerror = () => reject(new Error("Could not read the selected file"));
+          reader.readAsDataURL(S.selectedFile);
+        });
+        r = await api.post("analyze_upload", {
+          filename: S.selectedFile.name, data: String(dataUrl).split(",", 2)[1],
+          profile: S.currentId,
+        });
+      } else {
+        r = await api.post("analyze_file", { path, profile: S.currentId });
+      }
+      S.analysis = r;
+      renderAnalysis(r);
+    } catch (e) {
+      box.innerHTML = `<div class="finding warn"><div class="fmsg">${esc(e.message)}</div></div>`;
+    }
+  }, "Analyzing…");
 }
 
 function renderAnalysis(r) {
@@ -653,25 +834,45 @@ function renderAnalysis(r) {
   S.spectrum = rep.spectrum && rep.spectrum.freqs ? rep.spectrum : null;
   drawEQ();
   const fmt = (v, unit = "", digits = 1) =>
-    v === null || v === undefined ? "—" :
+    v === null || v === undefined || (typeof v === "number" && !Number.isFinite(v)) ? "—" :
       (typeof v === "number" ? v.toFixed(digits) : v) + " " + unit;
+  const advice = r.advice || { findings: [] };
+  const canApply = advice.suggested_preamp_db !== null && advice.suggested_preamp_db !== undefined;
+  const suggested = advice.suggested_filters || [];
   box.innerHTML = `
     <div class="ar-section"><h4>${esc(r.path.split("/").pop())}</h4>
       <div class="ar-grid">
-        <span class="k">integrated</span><span class="v">${fmt(rep.integrated_lufs, "LUFS")}</span>
-        <span class="k">loudness range</span><span class="v">${fmt(rep.loudness_range_lu, "LU")}</span>
-        <span class="k">peak</span><span class="v">${fmt(rep.peak_db, "dBFS", 2)}</span>
-        <span class="k">true peak</span><span class="v">${fmt(rep.true_peak_db, "dBTP", 2)}</span>
-        <span class="k">crest factor</span><span class="v">${fmt(rep.crest_factor_db, "dB")}</span>
-        <span class="k">duration</span><span class="v">${fmt(rep.duration_s, "s", 1)}</span>
+        <span class="k">Integrated</span><span class="v">${fmt(rep.integrated_lufs, "LUFS")}</span>
+        <span class="k">Loudness range</span><span class="v">${fmt(rep.loudness_range_lu, "LU")}</span>
+        <span class="k">Sample peak</span><span class="v">${fmt(rep.peak_db, "dBFS", 2)}</span>
+        <span class="k">True peak</span><span class="v">${fmt(rep.true_peak_db, "dBTP", 2)}</span>
+        <span class="k">Crest factor</span><span class="v">${fmt(rep.crest_factor_db, "dB")}</span>
+        <span class="k">Duration</span><span class="v">${fmt(rep.duration_s, "s", 1)}</span>
+        <span class="k">Sample rate</span><span class="v">${fmt(rep.sample_rate, "Hz", 0)}</span>
+        <span class="k">Channels</span><span class="v">${fmt(rep.channels, "", 0)}</span>
       </div></div>
     <canvas class="spectrum-canvas" id="spec-canvas"></canvas>
-    <div class="ar-section"><h4>Advisor</h4>${
-      r.advice.findings.map(f => `
-      <div class="finding ${f.severity}">
+    ${canApply || suggested.length ? `<div class="ar-section"><h4 class="section-title">Quick fixes</h4>
+      ${canApply ? `<button id="apply-preamp" class="btn small full-width">Use safe preamp (${Number(advice.suggested_preamp_db).toFixed(1)} dB)</button>` : ""}
+      ${suggested.length ? `<button id="apply-fixes" class="btn small full-width" style="margin-top:6px">Add ${suggested.length} recommended band${suggested.length === 1 ? "" : "s"}</button>` : ""}
+    </div>` : ""}
+    <div class="ar-section"><h4 class="section-title">Smart advisor</h4>${
+      advice.findings.map(f => `
+      <div class="finding ${esc(f.severity)}">
         <div class="fmsg">${esc(f.message)}</div>
         ${f.hint ? `<div class="fhint">${esc(f.hint)}</div>` : ""}
       </div>`).join("")}</div>`;
+  $("#suggest-controls").classList.toggle("hidden", !S.spectrum);
+  if (canApply) $("#apply-preamp").addEventListener("click", () => {
+    S.resolved.preamp = { mode: "manual", gain_db: advice.suggested_preamp_db };
+    markDirty(); renderChain(); updatePreamp(); drawEQ();
+    toast("Safe preamp applied to the preview — save to activate it");
+  });
+  if (suggested.length) $("#apply-fixes").addEventListener("click", () => {
+    currentFilters().push(...JSON.parse(JSON.stringify(suggested)));
+    markDirty(); renderBands(); updatePreamp(); drawEQ();
+    toast("Recommended bands added to the preview");
+  });
   drawMiniSpectrum();
 }
 
@@ -685,7 +886,7 @@ function drawMiniSpectrum() {
   const W = rect.width, H = rect.height;
   const { freqs, db } = S.spectrum;
   const lo = Math.min(...db), hi = Math.max(...db);
-  ctx.strokeStyle = "#7aa2f7"; ctx.beginPath();
+  ctx.strokeStyle = "#8baef8"; ctx.beginPath();
   for (let i = 0; i < freqs.length; i++) {
     const x = (Math.log10(freqs[i]) - Math.log10(20)) /
               (Math.log10(20000) - Math.log10(20)) * W;
@@ -695,39 +896,196 @@ function drawMiniSpectrum() {
   ctx.stroke();
 }
 
+async function generateSuggestedEQ() {
+  if (!S.spectrum) { toast("Analyze an audio file first", true); return; }
+  await withButton($("#suggest-btn"), async () => {
+    try {
+      const target = $("#target-select").value;
+      const r = await api.post("suggest_eq", { spectrum: S.spectrum, target,
+                                               max_gain: 6, max_filters: 8 });
+      const filters = r.suggested_filters || [];
+      if (!filters.length) { toast("This content is already close to the selected target"); return; }
+      currentFilters().push(...filters);
+      markDirty(); renderBands(); updatePreamp(); drawEQ();
+      toast(`Added ${filters.length} corrective bands · RMS deviation ${r.deviation.rms_deviation_db.toFixed(1)} dB`);
+    } catch (e) { toast(e.message, true); }
+  }, "Matching…");
+}
+
 // ------------------------------------------------------------ system --
 async function loadDevices() {
   try {
     const r = await api.get("devices");
-    const sel = $("#device-select");
-    sel.innerHTML = "";
+    const select = $("#device-select");
+    select.innerHTML = "";
+    select.disabled = !r.available;
+    $("#pw-mini-status").textContent = r.available ? "Ready" : "Unavailable";
     if (!r.available) {
-      sel.innerHTML = "<option>PipeWire not available</option>";
+      select.innerHTML = "<option>PipeWire not available</option>";
+      $("#device-info").textContent = "Install and start PipeWire to manage system audio.";
+      $("#dot-pw").classList.remove("ok");
       return;
     }
-    for (const d of r.devices.filter(x => x.direction === "sink")) {
+    const sinks = r.devices.filter(x => x.direction === "sink");
+    for (const d of sinks) {
       const opt = document.createElement("option");
       opt.value = d.node_name;
-      opt.textContent = `${d.description} [${d.kind}]`;
+      opt.textContent = `${d.description} · ${d.kind}`;
       if (d.node_name === r.default_sink) opt.selected = true;
-      sel.appendChild(opt);
+      select.appendChild(opt);
     }
-    const cur = r.devices.find(d => d.node_name === r.default_sink);
-    $("#device-info").textContent = cur ?
-      `kind: ${cur.kind} · ${cur.media_class}` : "";
+    if (!sinks.length) select.innerHTML = "<option>No output devices found</option>";
+    const cur = sinks.find(d => d.node_name === r.default_sink) || sinks[0];
+    $("#device-info").textContent = cur ? `${cur.kind} · ${cur.media_class}` : "";
     $("#dot-pw").classList.add("ok");
-  } catch { $("#dot-pw").classList.remove("ok"); }
+  } catch {
+    $("#dot-pw").classList.remove("ok");
+    $("#pw-mini-status").textContent = "Unavailable";
+  }
 }
 
 async function loadStreams() {
   try {
     const r = await api.get("streams");
     const el = $("#stream-list");
-    if (!r.streams.length) { el.textContent = "no active streams"; return; }
+    $("#stream-count").textContent = r.streams.length;
+    if (!r.streams.length) { el.innerHTML = '<div class="empty-line">Play audio in an app to see its stream here.</div>'; return; }
     el.innerHTML = r.streams.slice(0, 12).map(s =>
       `<div class="row"><span>${esc(s.name.slice(0, 26))}</span>
        <span class="muted">${esc(s.binary || "")}</span></div>`).join("");
   } catch { /* ignore */ }
+}
+
+async function loadSystemOverview() {
+  try {
+    const r = await api.get("system_overview");
+    S.system = r;
+    $("#auto-wire").checked = !!r.auto_wire;
+    const services = r.autostart || [];
+    const enabled = services.length > 0 && services.every(s => s.enabled === "enabled");
+    const active = services.length > 0 && services.every(s => s.active === "active");
+    $("#autostart-info").textContent = !services.some(s => s.installed)
+      ? "Disabled · EQForge only runs when you open it"
+      : `${enabled ? "Enabled" : "Installed, not enabled"} · ${active ? "services running" : "services not running"}`;
+    $("#autostart-info").className = "status-description " + (enabled ? "ok" : "");
+    $("#autostart-btn").textContent = enabled ? "Disable login autostart" : "Enable login autostart";
+    const always = r.always_on || {};
+    $("#always-on-info").textContent = always.ok
+      ? `Active · new streams start on ${always.node}`
+      : always.installed
+        ? `Installed · waiting for ${always.node || "the EQForge node"}`
+        : "Disabled · streams are connected after they appear";
+    $("#always-on-info").className = "status-description " + (always.ok ? "ok" : always.installed ? "warn" : "");
+    $("#always-on-btn").textContent = always.installed ? "Disable always-on routing" : "Enable always-on routing";
+    if (r.native && r.native.available)
+      $("#engine-badge").textContent = `Native DSP · v${r.native.version || "1"}`;
+    else if (r.native) $("#engine-badge").textContent = "NumPy DSP fallback";
+  } catch (e) {
+    $("#autostart-info").textContent = "System details are unavailable";
+  }
+}
+
+async function startProcessing() {
+  await withButton($("#rt-start"), async () => {
+    try {
+      const r = await api.post("start_rt", { channels: 2 });
+      toast(r.already_running ? "Real-time processing is already running" : `Real-time engine started · PID ${r.pid}`);
+      await refreshStatus(); await loadSystemOverview(); await loadDevices();
+    } catch (e) { toast(e.message, true); }
+  }, "Starting…");
+  renderMeters(S.rt);
+}
+
+async function stopProcessing() {
+  await withButton($("#rt-stop"), async () => {
+    try {
+      await api.post("stop_rt", {});
+      toast("Real-time processing stopped");
+      await refreshStatus(); await loadSystemOverview();
+    } catch (e) { toast(e.message, true); }
+  }, "Stopping…");
+  renderMeters(S.rt);
+}
+
+async function wireStreams() {
+  await withButton($("#rt-wire"), async () => {
+    try {
+      const r = await api.post("wire", {});
+      toast(`Connected ${r.streams_moved} stream${r.streams_moved === 1 ? "" : "s"} · ${r.already_wired} already connected`);
+      await loadStreams();
+    } catch (e) { toast(e.message, true); }
+  }, "Connecting…");
+}
+
+async function toggleAutostart() {
+  const enabled = $("#autostart-btn").textContent.startsWith("Disable");
+  if (enabled) {
+    const res = await modal("Disable login autostart?", [], {
+      description: "EQForge will no longer start its engine and background services when you log in.",
+      okText: "Disable autostart", danger: true,
+    });
+    if (!res) return;
+  }
+  await withButton($("#autostart-btn"), async () => {
+    try {
+      const r = await api.post("autostart", { value: !enabled });
+      toast(!enabled
+        ? (r.complete ? "Login autostart enabled" : "Service files created; systemd needs attention")
+        : "Login autostart disabled", !r.complete);
+      await loadSystemOverview();
+    } catch (e) { toast(e.message, true); }
+  }, enabled ? "Disabling…" : "Enabling…");
+}
+
+async function toggleAlwaysOn() {
+  const enabled = $("#always-on-btn").textContent.startsWith("Disable");
+  await withButton($("#always-on-btn"), async () => {
+    try {
+      const r = await api.post("always_on", { value: !enabled });
+      toast(!enabled
+        ? (r.restarted ? "Always-on routing enabled" : "Routing saved; WirePlumber restart needs attention")
+        : "Always-on routing disabled", !!r.error);
+      await loadSystemOverview();
+    } catch (e) { toast(e.message, true); }
+  }, enabled ? "Disabling…" : "Enabling…");
+}
+
+async function setupIntegration() {
+  await withButton($("#setup-btn"), async () => {
+    try {
+      const r = await api.post("system_setup", {});
+      const updated = r.files.filter(f => f.status !== "same").length;
+      toast(updated ? `Integration repaired · ${updated} file${updated === 1 ? "" : "s"} updated` : "Integration files are already up to date");
+      if (!r.daemon_reload) toast("Files saved, but systemd could not reload them", true);
+      await loadSystemOverview();
+    } catch (e) { toast(e.message, true); }
+  }, "Installing…");
+}
+
+async function runDoctor() {
+  const box = $("#doctor-result");
+  box.innerHTML = '<div class="loading-row"><span class="spinner"></span>Running checks…</div>';
+  await withButton($("#doctor-btn"), async () => {
+    try {
+      const r = await api.post("doctor", {});
+      box.innerHTML = r.checks.map(c => `<div class="doctor-check ${c.status === "PASS" ? "" : "warn"}">
+        <svg><use href="#${c.status === "PASS" ? "i-check" : "i-help"}"/></svg>
+        <div><strong>${esc(c.name)}</strong><small>${esc(c.detail)}${c.hint ? " · " + esc(c.hint) : ""}</small></div></div>`).join("");
+      toast(r.healthy ? "All diagnostics passed" : `Diagnostics complete · ${r.warnings} item${r.warnings === 1 ? "" : "s"} need attention`, !r.healthy);
+    } catch (e) { box.innerHTML = `<div class="finding warn">${esc(e.message)}</div>`; }
+  }, "Checking…");
+}
+
+async function showLogs() {
+  try {
+    const r = await api.get("runtime_log");
+    const text = ["REAL-TIME ENGINE", ...(r.rt.length ? r.rt : ["No engine log entries."]),
+                  "", "BACKGROUND SERVICE", ...(r.daemon.length ? r.daemon : ["No daemon log entries."])].join("\n");
+    await modal("Recent engine logs", [], {
+      description: "The latest diagnostics from this computer.", okText: "Done",
+      bodyHtml: `<div class="log-view">${esc(text)}</div>`,
+    });
+  } catch (e) { toast(e.message, true); }
 }
 
 // ------------------------------------------------------------- meters --
@@ -742,13 +1100,24 @@ function renderMeters(rt) {
     $("#m-latency").textContent = rt.latency_frames != null ?
       `${rt.latency_frames}f · ${(1000 * rt.latency_frames / sr).toFixed(2)} ms` : "—";
     $("#rt-info").textContent =
-      `running · ${rt.sample_rate} Hz · buffer ${rt.buffer_size}`;
-    drawOutputMeter(rt.out_peak_db ?? -70);
+      `Running · ${rt.sample_rate || "—"} Hz · ${rt.buffer_size || "—"} frame buffer`;
+    $("#system-headline").textContent = "Processing is live";
+    $("#system-state-dot").className = "large-status-dot ok";
+    $("#rt-start").disabled = true;
+    $("#rt-stop").disabled = false;
+    const peak = rt.out_peak_db ?? -70;
+    $("#m-peak").textContent = `${peak <= -69 ? "−∞" : peak.toFixed(1)} dBFS`;
+    drawOutputMeter(peak);
   } else {
     dot.classList.remove("ok");
-    $("#rt-info").textContent = "not running — start it below or run `eqforge system start`";
+    $("#rt-info").textContent = "Stopped · start processing to hear your profile system-wide.";
+    $("#system-headline").textContent = "Engine is stopped";
+    $("#system-state-dot").className = "large-status-dot";
+    $("#rt-start").disabled = false;
+    $("#rt-stop").disabled = true;
     $("#m-lufs").textContent = "— LUFS";
     $("#m-lim").textContent = "—";
+    $("#m-peak").textContent = "— dBFS";
     drawOutputMeter(-70);
   }
 }
@@ -763,8 +1132,8 @@ function drawOutputMeter(peakDb) {
   ctx.fillStyle = "#1a1d26"; ctx.fillRect(0, 0, W, H);
   const norm = clamp((peakDb + 60) / 60, 0, 1);
   const grad = ctx.createLinearGradient(0, 0, W, 0);
-  grad.addColorStop(0, "#9ece6a"); grad.addColorStop(0.75, "#e0af68");
-  grad.addColorStop(0.95, "#f7768e");
+  grad.addColorStop(0, "#9ce3b1"); grad.addColorStop(0.75, "#efc477");
+  grad.addColorStop(0.95, "#fb8b9d");
   ctx.fillStyle = grad;
   ctx.fillRect(2, 3, (W - 4) * norm, H - 6);
   // ticks
@@ -789,8 +1158,39 @@ function connectSSE() {
   });
   es.addEventListener("graph_changed", () => { loadDevices(); loadStreams(); });
   es.addEventListener("profiles_changed", () => loadProfiles());
+  es.addEventListener("system_changed", () => loadSystemOverview());
+  es.addEventListener("auto_wire", (e) => {
+    const d = JSON.parse(e.data); $("#auto-wire").checked = !!d.enabled;
+  });
+  es.addEventListener("rt_error", (e) => {
+    const d = JSON.parse(e.data); toast(d.hint ? `${d.error} · ${d.hint}` : d.error, true);
+  });
   es.onerror = () => { $("#dot-daemon").classList.remove("ok"); };
   es.onopen = () => { $("#dot-daemon").classList.add("ok"); };
+}
+
+function selectAudioFile(file) {
+  if (!file) return;
+  S.selectedFile = file;
+  $("#file-path").value = "";
+  const el = $("#selected-file");
+  el.textContent = `${file.name} · ${formatBytes(file.size)}`;
+  el.classList.remove("hidden");
+}
+
+async function showHelp() {
+  await modal("Studio shortcuts", [], {
+    eyebrow: "QUICK GUIDE", okText: "Got it",
+    description: "Everything is available here in the GUI — no command line needed.",
+    bodyHtml: `<div class="shortcut-list">
+      <span>Save and activate the current profile</span><span><kbd>Ctrl</kbd> + <kbd>S</kbd></span>
+      <span>Bypass / resume all processing</span><span><kbd>Space</kbd></span>
+      <span>Remove the selected EQ band</span><span><kbd>Delete</kbd></span>
+      <span>Add a band at a precise point</span><span>Double-click curve</span>
+      <span>Adjust a band's Q / width</span><span>Scroll over handle</span>
+      <span>Open this guide</span><span><kbd>?</kbd></span>
+    </div><p>Tip: analysis and target matching only change your preview. Use <strong>Save & activate</strong> when the curve sounds right.</p>`,
+  });
 }
 
 // ---------------------------------------------------------------- init --
@@ -803,8 +1203,12 @@ async function refreshStatus() {
     $("#slot-b").classList.toggle("active", st.active_slot === "B");
     $("#slot-a").title = "Slot A: " + st.slot_a;
     $("#slot-b").title = "Slot B: " + st.slot_b;
+    $("#slot-a-name").textContent = st.slot_a;
+    $("#slot-b-name").textContent = st.slot_b;
     $("#bypass-btn").classList.toggle("on", st.bypass);
+    $("#bypass-btn").setAttribute("aria-pressed", String(!!st.bypass));
     $("#auto-switch").checked = !!st.auto_switch;
+    $("#auto-wire").checked = !!st.auto_wire;
     if (!S.currentId || (!S.dirty && st.active_profile !== S.currentId))
       await activateProfile(st.active_profile, true);
     renderMeters(st.rt);
@@ -824,6 +1228,14 @@ async function toggleBypass() {
 function init() {
   $("#engine-badge").textContent = "loading…";
   initEQInteraction();
+  $("#add-band-btn").addEventListener("click", () => addBand());
+  $("#show-ghosts").addEventListener("change", (e) => { S.showGhosts = e.target.checked; drawEQ(); });
+  $("#show-spectrum").addEventListener("change", (e) => { S.showSpectrum = e.target.checked; drawEQ(); });
+  $("#gain-range").addEventListener("change", drawEQ);
+  $("#help-btn").addEventListener("click", showHelp);
+  $("#menu-toggle").addEventListener("click", () => document.body.classList.add("sidebar-open"));
+  $("#sidebar-close").addEventListener("click", closeSidebar);
+  $("#sidebar-backdrop").addEventListener("click", closeSidebar);
   $("#profile-search").addEventListener("input", loadProfiles);
   $("#profile-select").addEventListener("change", (e) =>
     activateProfile(e.target.value));
@@ -840,6 +1252,13 @@ function init() {
     const res = await modal("New profile",
       [{ label: "id", value: "" }, { label: "name", value: "" }]);
     if (!res || !res.id.trim()) return;
+    const newId = res.id.trim();
+    if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(newId)) {
+      toast("Invalid ID — use letters, digits, . _ or -", true); return;
+    }
+    if (S.profiles.some(p => p.id === newId)) {
+      toast(`A profile named “${newId}” already exists`, true); return;
+    }
     try {
       await api.post("save_profile", { profile: {
         format: "eqforge.profile", format_version: 2,
@@ -852,9 +1271,27 @@ function init() {
       toast("Created " + res.id.trim());
     } catch (e) { toast(String(e.message), true); }
   });
-  $("#import-hint").addEventListener("click", () =>
-    toast("Import from the terminal: eqforge import <file> (AutoEQ, REW, APO, CSV)"));
+  $("#import-btn").addEventListener("click", () => $("#import-input").click());
+  $("#import-input").addEventListener("change", async (e) => {
+    await importProfileFile(e.target.files[0]); e.target.value = "";
+  });
+  $("#duplicate-btn").addEventListener("click", duplicateCurrentProfile);
+  $("#export-btn").addEventListener("click", exportCurrentProfile);
+  $("#delete-btn").addEventListener("click", deleteCurrentProfile);
+  $("#file-input").addEventListener("change", (e) => selectAudioFile(e.target.files[0]));
+  const drop = $("#file-drop");
+  ["dragenter", "dragover"].forEach(type => drop.addEventListener(type, (e) => {
+    e.preventDefault(); drop.classList.add("dragging");
+  }));
+  ["dragleave", "drop"].forEach(type => drop.addEventListener(type, (e) => {
+    e.preventDefault(); drop.classList.remove("dragging");
+  }));
+  drop.addEventListener("drop", (e) => selectAudioFile(e.dataTransfer.files[0]));
   $("#analyze-btn").addEventListener("click", analyzeFile);
+  $("#suggest-btn").addEventListener("click", generateSuggestedEQ);
+  $("#file-path").addEventListener("input", (e) => {
+    if (e.target.value.trim()) { S.selectedFile = null; $("#selected-file").classList.add("hidden"); }
+  });
   $("#file-path").addEventListener("keydown", (e) => {
     if (e.key === "Enter") analyzeFile(); });
   document.querySelectorAll(".tab").forEach((t) =>
@@ -863,28 +1300,62 @@ function init() {
       document.querySelectorAll(".tab-body").forEach(x => x.classList.remove("active"));
       t.classList.add("active");
       $("#tab-" + t.dataset.tab).classList.add("active");
-      if (t.dataset.tab === "system") { loadDevices(); loadStreams(); }
+      if (t.dataset.tab === "system") { loadDevices(); loadStreams(); loadSystemOverview(); }
     }));
   $("#auto-switch").addEventListener("change", async (e) => {
-    await api.post("auto_switch", { value: e.target.checked });
-    toast(e.target.checked ? "Auto-switch enabled" : "Auto-switch disabled");
+    try {
+      await api.post("auto_switch", { value: e.target.checked });
+      if (e.target.checked) await api.post("apply_rules_now", {});
+      toast(e.target.checked ? "Device-based profiles enabled" : "Device-based profiles disabled");
+    } catch (err) { toast(err.message, true); e.target.checked = !e.target.checked; }
   });
-  $("#rt-start").addEventListener("click", async () => {
-    toast("Starting the RT host needs a terminal: `eqforge system start`");
+  $("#auto-wire").addEventListener("change", async (e) => {
+    try {
+      await api.post("set_auto_wire", { value: e.target.checked });
+      toast(e.target.checked ? "Automatic stream wiring enabled" : "Automatic stream wiring disabled");
+    } catch (err) { toast(err.message, true); e.target.checked = !e.target.checked; }
   });
+  $("#device-select").addEventListener("change", async (e) => {
+    try {
+      const r = await api.post("set_device", { device: e.target.value });
+      toast(`Default output changed to ${r.description}`);
+      await loadDevices();
+    } catch (err) { toast(err.message, true); await loadDevices(); }
+  });
+  $("#rt-start").addEventListener("click", startProcessing);
+  $("#rt-stop").addEventListener("click", stopProcessing);
+  $("#rt-wire").addEventListener("click", wireStreams);
+  $("#rt-refresh").addEventListener("click", async () => {
+    await Promise.all([refreshStatus(), loadDevices(), loadStreams(), loadSystemOverview()]);
+    toast("System status refreshed");
+  });
+  $("#autostart-btn").addEventListener("click", toggleAutostart);
+  $("#always-on-btn").addEventListener("click", toggleAlwaysOn);
+  $("#setup-btn").addEventListener("click", setupIntegration);
+  $("#doctor-btn").addEventListener("click", runDoctor);
+  $("#logs-btn").addEventListener("click", showLogs);
 
+  window.addEventListener("keydown", (e) => {
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") {
+      e.preventDefault(); saveProfile(false);
+    } else if (e.key === "?" && !["INPUT", "TEXTAREA", "SELECT"].includes(document.activeElement.tagName)) {
+      e.preventDefault(); showHelp();
+    } else if (e.key === "Escape") closeSidebar();
+  });
+  window.addEventListener("beforeunload", (e) => {
+    if (S.dirty) { e.preventDefault(); e.returnValue = ""; }
+  });
   window.addEventListener("resize", () => { drawEQ(); drawMiniSpectrum(); });
 
   connectSSE();
   (async () => {
     await loadProfiles();
     await refreshStatus();
-    await loadDevices();
-    try {
-      const nat = await api.post("rt_command", { cmd: { cmd: "status" } });
-      $("#engine-badge").textContent =
-        (nat.rt && nat.rt.running) ? `native · ${nat.rt.sample_rate} Hz` : "native core";
-    } catch { $("#engine-badge").textContent = "native core"; }
+    await Promise.all([loadDevices(), loadSystemOverview()]);
+    if (S.system && S.system.native) {
+      $("#engine-badge").textContent = S.system.native.available
+        ? `Native DSP · ${S.system.native.version || "ready"}` : "NumPy DSP fallback";
+    }
   })();
   setInterval(refreshStatus, 5000);
   setInterval(() => {

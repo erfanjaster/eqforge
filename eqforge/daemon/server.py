@@ -234,9 +234,54 @@ class Daemon:
             return result
 
         if method == "delete_profile":
-            store.delete(self._require_str(params, "profile"))
+            profile_id = self._require_str(params, "profile")
+            store.delete(profile_id)
+            # Never leave the active session pointing at a deleted document.
+            # The other A/B slot gets the same safe fallback when necessary.
+            fallback = "flat" if profile_id != "flat" else None
+            changed = False
+            if fallback:
+                if st.slot_a == profile_id:
+                    st.slot_a = fallback
+                    changed = True
+                if st.slot_b == profile_id:
+                    st.slot_b = fallback
+                    changed = True
+            if changed:
+                st._persist()
+                st.set_profile(st.active_profile)
             self.bus.publish("profiles_changed", {})
-            return {"ok": True}
+            return {"ok": True, "active_profile": st.active_profile}
+
+        if method == "import_profile":
+            from eqforge.gui import actions
+            result = actions.import_profile(
+                store, self._require_str(params, "filename"),
+                self._require_str(params, "content"),
+                params.get("profile_id"), params.get("name"))
+            self.bus.publish("profiles_changed", {})
+            return result
+
+        if method == "export_profile":
+            from eqforge.gui import actions
+            return actions.export_profile(
+                store, self._require_str(params, "profile"))
+
+        if method == "suggest_eq":
+            from eqforge.gui import actions
+            return actions.suggest_eq(
+                params.get("spectrum"), params.get("target", "harman-overear"),
+                params.get("max_gain", 6.0), params.get("max_filters", 8))
+
+        if method == "analyze_upload":
+            import tempfile
+            from eqforge.gui import actions
+            with tempfile.TemporaryDirectory(prefix="eqforge-audio-") as tmp:
+                path = actions.decode_audio_upload(
+                    self._require_str(params, "filename"),
+                    self._require_str(params, "data"), tmp)
+                return self._analyze_file({"path": str(path),
+                                           "profile": params.get("profile")})
 
         if method == "devices":
             return {"devices": [d.to_dict() for d in pw.list_devices()],
@@ -296,6 +341,56 @@ class Daemon:
             log.info("auto-wire %s", "enabled" if value else "disabled")
             self.bus.publish("auto_wire", {"enabled": value})
             return {"auto_wire": value}
+
+        if method == "set_device":
+            from eqforge.gui import actions
+            result = actions.set_default_device(
+                self._require_str(params, "device"))
+            self._apply_rules(reason="manual")
+            self.bus.publish("graph_changed",
+                             {"default_sink": result["default_sink"]})
+            return result
+
+        if method == "start_rt":
+            from eqforge.gui import actions
+            return actions.start_rt(self, int(params.get("channels", 2) or 2))
+
+        if method == "stop_rt":
+            from eqforge.gui import actions
+            return actions.stop_rt(self)
+
+        if method == "system_overview":
+            from eqforge.gui import actions
+            return actions.system_overview(self)
+
+        if method == "system_setup":
+            from eqforge.gui import actions
+            return actions.system_setup()
+
+        if method == "autostart":
+            from eqforge.gui import actions
+            if "value" not in params:
+                raise EQForgeError("missing required parameter 'value'")
+            result = actions.autostart(bool(params["value"]))
+            self.auto_wire = bool(params["value"])
+            self.bus.publish("system_changed", {})
+            return result
+
+        if method == "always_on":
+            from eqforge.gui import actions
+            if "value" not in params:
+                raise EQForgeError("missing required parameter 'value'")
+            result = actions.always_on(bool(params["value"]))
+            self.bus.publish("system_changed", {})
+            return result
+
+        if method == "doctor":
+            from eqforge.gui import actions
+            return actions.doctor()
+
+        if method == "runtime_log":
+            from eqforge.gui import actions
+            return actions.runtime_log(params.get("lines", 100))
 
         raise EQForgeError(f"unknown RPC method {method!r}")
 
@@ -748,7 +843,13 @@ class HTTPHandler(BaseHTTPRequestHandler):
         if self._origin_rejected():
             return self._json({"ok": False,
                                "error": "cross-origin request refused"}, 403)
-        length = int(self.headers.get("Content-Length", 0))
+        try:
+            length = int(self.headers.get("Content-Length", 0))
+        except ValueError:
+            return self._json({"ok": False, "error": "bad content length"}, 400)
+        # 128 MB of audio becomes roughly 171 MB in the JSON/base64 upload.
+        if length < 0 or length > 180 * 1024 * 1024:
+            return self._json({"ok": False, "error": "request too large"}, 413)
         try:
             body = json.loads(self.rfile.read(length) or b"{}")
         except json.JSONDecodeError:
@@ -774,6 +875,9 @@ class HTTPHandler(BaseHTTPRequestHandler):
         except EQForgeError as e:
             self._json({"ok": False, "error": str(e.message),
                         "hint": e.hint}, 400)
+        except Exception as e:  # noqa: BLE001
+            log.error("api GET crash: %s\n%s", e, traceback.format_exc())
+            self._json({"ok": False, "error": f"internal: {e}"}, 500)
 
     def _sse(self) -> None:
         self.send_response(200)
