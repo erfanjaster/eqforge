@@ -41,7 +41,11 @@ slide-out drawer and the studio panels stack vertically.
 
 **Activate** — choose a profile in the top bar or click it in the library. The
 resolved profile is sent to the running engine immediately with click-guarded
-hot reload.
+hot reload. Built-in starting points include **All-Round**, **U-Shape**,
+**V-Shape**, **Warm**, **Bright**, and **Relaxed**, alongside the existing
+music, movie, gaming, voice and headphone profiles. These are broad tonal
+starting points, not measurements of a particular headphone or speaker; adjust
+them to taste or import a device-specific correction.
 
 **Edit** — drag band handles, scroll over a handle to change Q, double-click
 empty space to add a band, or use **Add band**. The table provides exact

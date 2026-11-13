@@ -6,6 +6,8 @@ PKG_CONFIG ?= pkg-config
 CORE_DIR := ../core
 CORE_INC := $(CORE_DIR)/include
 CORE_LIB := $(CORE_DIR)/build/libeqforge.a
+PREFIX ?= /usr
+DESTDIR ?=
 
 JACK_CFLAGS := $(shell $(PKG_CONFIG) --cflags jack 2>/dev/null)
 JACK_LIBS := $(shell $(PKG_CONFIG) --libs jack 2>/dev/null || echo "-ljack")
@@ -80,8 +82,8 @@ test-tsan: $(CORE_LIB)
 	cd $(TEST_DIR) && ./test_rthost . ./eqforge-rt
 
 install: $(OUT)
-	install -d $(DESTDIR)/usr/libexec/eqforge
-	install -m 755 $(OUT) $(DESTDIR)/usr/libexec/eqforge/
+	install -d $(DESTDIR)$(PREFIX)/libexec/eqforge
+	install -m 755 $(OUT) $(DESTDIR)$(PREFIX)/libexec/eqforge/
 
 clean:
 	rm -rf build

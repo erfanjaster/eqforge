@@ -618,7 +618,9 @@ do_rollback() {
         fetch_source
         build_native
         install_python
-        restore_native
+        # build_native has already installed the native artifacts from the
+        # previous source tree. Do not restore the backup made above: that is
+        # the currently-installed (newer) build and would undo the rollback.
         # forget the version we just rolled back from, so a second --rollback
         # does not bounce between the same two builds
         json_write "$MARKER" "version=$version" "ref=$TARGET_REF" \
@@ -714,7 +716,12 @@ main() {
         info "pass --system for a /usr install, or run as your normal user"
     fi
 
-    mkdir -p "$DATA"
+    # Read-only modes must not create the data directory just to inspect state.
+    # Besides being surprising, that violated the documented --check/--dry-run
+    # promise that they leave the machine unchanged.
+    if [ "$MODE" != "check" ] && [ "$MODE" != "dryrun" ]; then
+        mkdir -p "$DATA"
+    fi
     if have flock && [ "$MODE" != "check" ] && [ "$MODE" != "dryrun" ]; then
         LOCK="$DATA/.update.lock"
         exec 9>"$LOCK"

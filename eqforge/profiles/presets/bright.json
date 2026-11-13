@@ -1,0 +1,54 @@
+{
+  "format": "eqforge.profile",
+  "format_version": 2,
+  "id": "bright",
+  "name": "Bright",
+  "description": "A restrained clarity tilt: slightly tighter bass, a small presence lift and more treble air. Back off the high shelf if it sounds fatiguing.",
+  "tags": [
+    "bright",
+    "clarity",
+    "detail"
+  ],
+  "builtin": true,
+  "preamp": {
+    "mode": "auto"
+  },
+  "eq": {
+    "filters": [
+      {
+        "type": "lowshelf",
+        "freq": 110,
+        "gain_db": -1.0,
+        "q": 0.71,
+        "enabled": true,
+        "name": "tighten bass",
+        "use_q": false
+      },
+      {
+        "type": "peak",
+        "freq": 3200,
+        "gain_db": 1.5,
+        "q": 1.0,
+        "enabled": true,
+        "name": "presence"
+      },
+      {
+        "type": "highshelf",
+        "freq": 9000,
+        "gain_db": 2.0,
+        "q": 0.71,
+        "enabled": true,
+        "name": "air",
+        "use_q": false
+      }
+    ]
+  },
+  "limiter": {
+    "enabled": true,
+    "ceiling_db": -1.0,
+    "attack_ms": 5.0,
+    "release_ms": 60.0,
+    "lookahead_ms": 1.5,
+    "knee_db": 3.0
+  }
+}

@@ -1,0 +1,55 @@
+{
+  "format": "eqforge.profile",
+  "format_version": 2,
+  "id": "u-shape",
+  "name": "U-Shape",
+  "description": "Classic U-shaped tone with lifted bass and treble and gently recessed mids. A fun, moderate starting point for music; not a headphone-specific correction.",
+  "tags": [
+    "u-shape",
+    "music",
+    "bass",
+    "treble"
+  ],
+  "builtin": true,
+  "preamp": {
+    "mode": "auto"
+  },
+  "eq": {
+    "filters": [
+      {
+        "type": "lowshelf",
+        "freq": 100,
+        "gain_db": 3.5,
+        "q": 0.71,
+        "enabled": true,
+        "name": "bass lift",
+        "use_q": false
+      },
+      {
+        "type": "peak",
+        "freq": 900,
+        "gain_db": -2.0,
+        "q": 0.75,
+        "enabled": true,
+        "name": "recessed mids"
+      },
+      {
+        "type": "highshelf",
+        "freq": 8500,
+        "gain_db": 2.5,
+        "q": 0.71,
+        "enabled": true,
+        "name": "treble lift",
+        "use_q": false
+      }
+    ]
+  },
+  "limiter": {
+    "enabled": true,
+    "ceiling_db": -1.0,
+    "attack_ms": 5.0,
+    "release_ms": 60.0,
+    "lookahead_ms": 1.5,
+    "knee_db": 3.0
+  }
+}
