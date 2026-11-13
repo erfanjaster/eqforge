@@ -17,9 +17,9 @@ PREFIX ?= $(HOME)/.local
 PKG_CONFIG ?= pkg-config
 
 # --- dependency probes (empty result == not installed) ---
-HAVE_SPA      := $(shell $(PKG_CONFIG) --exists libspa-0.2 && echo 1)
-HAVE_JACK     := $(shell ($(PKG_CONFIG) --exists jack || \
-                          $(PKG_CONFIG) --exists jack2) && echo 1)
+HAVE_SPA      := $(shell $(PKG_CONFIG) --exists libspa-0.2 2>/dev/null && echo 1)
+HAVE_JACK     := $(shell ($(PKG_CONFIG) --exists jack 2>/dev/null || \
+                          $(PKG_CONFIG) --exists jack2 2>/dev/null) && echo 1)
 
 .PHONY: all core pipewire rthost test test-core test-module test-module-asan \
         test-rthost test-python test-e2e \
@@ -134,9 +134,11 @@ test-python:
 
 install: all
 	$(MAKE) -C core install PREFIX=$(PREFIX)
-	@if [ -n "$(HAVE_SPA)" ]; then $(MAKE) -C pipewire install; \
+	@if [ -n "$(HAVE_SPA)" ]; then \
+	  $(MAKE) -C pipewire install SPA_LIBDIR="$(PREFIX)/lib"; \
 	 else echo "  SKIP pipewire install (not built)"; fi
-	@if [ -n "$(HAVE_JACK)" ]; then $(MAKE) -C rthost install; \
+	@if [ -n "$(HAVE_JACK)" ]; then \
+	  $(MAKE) -C rthost install PREFIX="$(PREFIX)"; \
 	 else echo "  SKIP rthost install (not built)"; fi
 	$(PYTHON) -m pip install --user -e .
 

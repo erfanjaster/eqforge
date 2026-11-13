@@ -15,6 +15,7 @@ minute, none of which belong in the unit suite.
 """
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 from pathlib import Path
@@ -83,7 +84,7 @@ def test_check_on_empty_home_reports_not_installed(tmp_path):
     assert "none" in r.stdout            # installed: none
     assert "not installed" in r.stdout
     # a check must not create the install tree
-    assert not (tmp_path / "data/eqforge/install.json").exists()
+    assert not (tmp_path / "data/eqforge").exists()
     assert not (tmp_path / ".local/bin/eqforge").exists()
 
 
@@ -97,7 +98,7 @@ def test_dry_run_plans_an_install_and_changes_nothing(tmp_path):
     assert "would: create" in out and "venv" in out
     assert "native core" in out and "python package" in out
     # nothing may be installed, built or recorded by a dry run
-    assert not (tmp_path / "data/eqforge/install.json").exists()
+    assert not (tmp_path / "data/eqforge").exists()
     assert not (tmp_path / ".local/bin/eqforge").exists()
     assert not (tmp_path / ".local/lib/eqforge").exists()
 
@@ -122,6 +123,42 @@ def test_rollback_without_state_errors(tmp_path):
     r = run_script("--rollback", home=tmp_path)
     assert r.returncode != 0
     assert "nothing to roll back" in (r.stdout + r.stderr)
+
+
+def test_rollback_keeps_native_build_from_previous_source(tmp_path):
+    """Rollback must not overwrite the rebuilt old native files with its backup."""
+    old_source = tmp_path / "old-source"
+    old_source.mkdir()
+    marker = tmp_path / "install.json"
+    marker.write_text(json.dumps({
+        "previous_version": "1.0.0",
+        "previous_source": str(old_source),
+        "previous_ref": "v1.0.0",
+    }))
+    calls = tmp_path / "calls.log"
+    # Load the script's function definitions without invoking its normal main,
+    # then stub side-effecting phases so this regression test stays offline.
+    definitions = SCRIPT.read_text().rsplit('\nmain "$@"', 1)[0]
+    harness = definitions + f'''\nMARKER={str(marker)!r}
+CALLS={str(calls)!r}
+log_call() {{ printf '%s\\n' "$1" >> "$CALLS"; }}
+backup_native() {{ log_call backup; }}
+stop_units() {{ log_call stop; }}
+fetch_source() {{ log_call fetch; }}
+build_native() {{ log_call build; }}
+install_python() {{ log_call python; }}
+restore_native() {{ log_call restore; }}
+autostart_step() {{ log_call autostart; }}
+start_units() {{ log_call start; }}
+verify() {{ log_call verify; }}
+do_rollback
+'''
+    r = subprocess.run(["bash", "-c", harness], capture_output=True, text=True,
+                       timeout=60, env={**os.environ, "HOME": str(tmp_path)})
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert calls.read_text().splitlines() == [
+        "backup", "stop", "fetch", "build", "python", "autostart", "start", "verify"
+    ]
 
 
 def test_uninstall_is_safe_on_a_clean_machine(tmp_path):
