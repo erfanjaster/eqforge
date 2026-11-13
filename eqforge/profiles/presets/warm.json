@@ -1,0 +1,54 @@
+{
+  "format": "eqforge.profile",
+  "format_version": 2,
+  "id": "warm",
+  "name": "Warm",
+  "description": "Adds a little low-end warmth while softly easing upper-mid and treble energy. Useful as a starting point for thin or bright-sounding playback.",
+  "tags": [
+    "warm",
+    "smooth",
+    "bass"
+  ],
+  "builtin": true,
+  "preamp": {
+    "mode": "auto"
+  },
+  "eq": {
+    "filters": [
+      {
+        "type": "lowshelf",
+        "freq": 140,
+        "gain_db": 2.5,
+        "q": 0.71,
+        "enabled": true,
+        "name": "warmth",
+        "use_q": false
+      },
+      {
+        "type": "peak",
+        "freq": 2800,
+        "gain_db": -1.0,
+        "q": 1.1,
+        "enabled": true,
+        "name": "soften presence"
+      },
+      {
+        "type": "highshelf",
+        "freq": 8500,
+        "gain_db": -1.5,
+        "q": 0.71,
+        "enabled": true,
+        "name": "soften treble",
+        "use_q": false
+      }
+    ]
+  },
+  "limiter": {
+    "enabled": true,
+    "ceiling_db": -1.0,
+    "attack_ms": 5.0,
+    "release_ms": 60.0,
+    "lookahead_ms": 1.5,
+    "knee_db": 3.0
+  }
+}

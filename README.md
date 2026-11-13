@@ -180,9 +180,10 @@ eqforge doctor
 eqforge analyze song.flac
 eqforge apply bass-boost song.flac song-processed.flac
 
-# 5. see your profiles, draw the curve in your terminal
+# 5. browse built-in starting points and inspect their curves
 eqforge list-profiles
-eqforge show headphone-crossfeed
+eqforge show all-round
+eqforge set-profile u-shape       # also: v-shape, warm, bright, relaxed
 
 # 6. system-wide processing (PipeWire session required)
 eqforge system setup && eqforge system start

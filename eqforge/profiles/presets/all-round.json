@@ -1,0 +1,62 @@
+{
+  "format": "eqforge.profile",
+  "format_version": 2,
+  "id": "all-round",
+  "name": "All-Round (Gentle Balance)",
+  "description": "A subtle everyday starting point: a touch of bass weight, a cleaner low-midrange and a little presence and air. Kept intentionally mild for mixed music, video and games.",
+  "tags": [
+    "general",
+    "balanced",
+    "everyday"
+  ],
+  "builtin": true,
+  "preamp": {
+    "mode": "auto"
+  },
+  "eq": {
+    "filters": [
+      {
+        "type": "lowshelf",
+        "freq": 100,
+        "gain_db": 1.5,
+        "q": 0.71,
+        "enabled": true,
+        "name": "bass weight",
+        "use_q": false
+      },
+      {
+        "type": "peak",
+        "freq": 260,
+        "gain_db": -1.0,
+        "q": 0.9,
+        "enabled": true,
+        "name": "less muddiness"
+      },
+      {
+        "type": "peak",
+        "freq": 2600,
+        "gain_db": 1.0,
+        "q": 1.0,
+        "enabled": true,
+        "name": "presence"
+      },
+      {
+        "type": "highshelf",
+        "freq": 9000,
+        "gain_db": 1.0,
+        "q": 0.71,
+        "enabled": true,
+        "name": "air",
+        "use_q": false
+      }
+    ]
+  },
+  "limiter": {
+    "enabled": true,
+    "ceiling_db": -1.0,
+    "attack_ms": 5.0,
+    "release_ms": 60.0,
+    "lookahead_ms": 1.5,
+    "knee_db": 3.0
+  }
+}

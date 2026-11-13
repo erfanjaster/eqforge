@@ -1,0 +1,64 @@
+{
+  "format": "eqforge.profile",
+  "format_version": 2,
+  "id": "v-shape",
+  "name": "V-Shape",
+  "description": "A more energetic V-shaped curve: stronger bass, pulled-back central mids and added upper-mid/treble detail. Reduce the boosts if your headphones sound boomy or sharp.",
+  "tags": [
+    "v-shape",
+    "music",
+    "energetic",
+    "bass",
+    "treble"
+  ],
+  "builtin": true,
+  "preamp": {
+    "mode": "auto"
+  },
+  "eq": {
+    "filters": [
+      {
+        "type": "lowshelf",
+        "freq": 95,
+        "gain_db": 4.0,
+        "q": 0.71,
+        "enabled": true,
+        "name": "bass impact",
+        "use_q": false
+      },
+      {
+        "type": "peak",
+        "freq": 850,
+        "gain_db": -3.0,
+        "q": 0.8,
+        "enabled": true,
+        "name": "scooped mids"
+      },
+      {
+        "type": "peak",
+        "freq": 3200,
+        "gain_db": 1.5,
+        "q": 1.0,
+        "enabled": true,
+        "name": "presence detail"
+      },
+      {
+        "type": "highshelf",
+        "freq": 9000,
+        "gain_db": 2.5,
+        "q": 0.71,
+        "enabled": true,
+        "name": "treble sparkle",
+        "use_q": false
+      }
+    ]
+  },
+  "limiter": {
+    "enabled": true,
+    "ceiling_db": -1.0,
+    "attack_ms": 5.0,
+    "release_ms": 60.0,
+    "lookahead_ms": 1.5,
+    "knee_db": 3.0
+  }
+}

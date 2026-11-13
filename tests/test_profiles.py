@@ -196,6 +196,28 @@ def test_store_builtin_presets_all_valid():
         json.dumps(cfg)
 
 
+def test_everyday_tone_presets_are_available_and_have_their_intended_shape():
+    from eqforge.profiles.store import ProfileStore
+    store = ProfileStore()
+    expected = {"all-round", "u-shape", "v-shape", "warm", "bright", "relaxed"}
+    assert expected <= set(store.builtin_profiles())
+
+    def bands(profile_id):
+        return store.resolve(profile_id)["eq"]["filters"]
+
+    for profile_id in ("u-shape", "v-shape"):
+        filters = bands(profile_id)
+        assert any(f["type"] == "lowshelf" and f["gain_db"] > 0
+                   for f in filters)
+        assert any(f["type"] == "peak" and f["gain_db"] < 0
+                   for f in filters)
+        assert any(f["type"] == "highshelf" and f["gain_db"] > 0
+                   for f in filters)
+
+    # The general-purpose choice is deliberately restrained.
+    assert max(abs(f.get("gain_db", 0)) for f in bands("all-round")) <= 1.5
+
+
 def test_store_user_shadows_builtin(tmp_path, monkeypatch):
     from eqforge.profiles.store import ProfileStore
     user_dir = tmp_path / "user"

@@ -1,0 +1,54 @@
+{
+  "format": "eqforge.profile",
+  "format_version": 2,
+  "id": "relaxed",
+  "name": "Relaxed (Treble Tame)",
+  "description": "A smoother, less fatiguing balance with a small bass lift and softened upper mids and treble. A gentle option for long listening sessions.",
+  "tags": [
+    "relaxed",
+    "smooth",
+    "treble"
+  ],
+  "builtin": true,
+  "preamp": {
+    "mode": "auto"
+  },
+  "eq": {
+    "filters": [
+      {
+        "type": "lowshelf",
+        "freq": 110,
+        "gain_db": 1.0,
+        "q": 0.71,
+        "enabled": true,
+        "name": "body",
+        "use_q": false
+      },
+      {
+        "type": "peak",
+        "freq": 4300,
+        "gain_db": -1.5,
+        "q": 1.0,
+        "enabled": true,
+        "name": "ease upper mids"
+      },
+      {
+        "type": "highshelf",
+        "freq": 9000,
+        "gain_db": -2.0,
+        "q": 0.71,
+        "enabled": true,
+        "name": "treble tame",
+        "use_q": false
+      }
+    ]
+  },
+  "limiter": {
+    "enabled": true,
+    "ceiling_db": -1.0,
+    "attack_ms": 5.0,
+    "release_ms": 60.0,
+    "lookahead_ms": 1.5,
+    "knee_db": 3.0
+  }
+}
