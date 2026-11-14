@@ -1,7 +1,11 @@
 #!/usr/bin/env bash
 # EQForge installer + updater  (one script, both jobs)
 #
-#   curl -fsSL https://raw.githubusercontent.com/erfanjaster/eqforge/main/scripts/eqforge-update.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/erfanjaster/eqforge/main/scripts/eqforge-update.sh -o eqforge-update.sh
+#   head -n 1 eqforge-update.sh             # must be: #!/usr/bin/env bash
+#   bash eqforge-update.sh
+#
+# Use the raw download, NOT GitHub's /blob/ page (that page is HTML).
 #
 #   ./scripts/eqforge-update.sh              # install if absent, update if present
 #   ./scripts/eqforge-update.sh --check      # only say what would happen

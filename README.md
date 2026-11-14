@@ -161,8 +161,15 @@ One script installs, updates and rolls back — it detects what is already on th
 machine and does the right thing either way:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/erfanjaster/eqforge/main/scripts/eqforge-update.sh | bash
+curl -fsSL https://raw.githubusercontent.com/erfanjaster/eqforge/main/scripts/eqforge-update.sh -o eqforge-update.sh
+# Check that this prints exactly: #!/usr/bin/env bash
+head -n 1 eqforge-update.sh
+bash eqforge-update.sh
 ```
+
+Use the **Raw** download above, not GitHub's `/blob/` file-view page. Saving
+that page downloads HTML; renaming it to `.sh` does not make it a shell script.
+If the first line is HTML, do not run the file.
 
 Then, or by hand from a checkout:
 
