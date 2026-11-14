@@ -7,15 +7,22 @@
 
 ## ۱. نصب یا به‌روزرسانی با یک اسکریپت
 
-یک اسکریپت، هم **نصب** است و هم **به‌روزرسانی**. لازم نیست بدانید نسخه‌ی قبلی
-نصب هست یا نه؛ خودش تشخیص می‌دهد:
+برای نصب کامل و آماده‌به‌کار:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/erfanjaster/eqforge/main/scripts/eqforge-update.sh -o eqforge-update.sh
+curl -fsSL https://raw.githubusercontent.com/erfanjaster/eqforge/main/scripts/eqforge.sh -o eqforge.sh
 # باید دقیقاً این خط را چاپ کند: #!/usr/bin/env bash
-head -n 1 eqforge-update.sh
-bash eqforge-update.sh
+head -n 1 eqforge.sh
+bash eqforge.sh --install
 ```
+
+`--install` هستهٔ C را کامپایل می‌کند، برنامه و وابستگی‌های Python را نصب
+می‌کند، میان‌بر منوی برنامه‌ها را می‌سازد، نصب را بررسی می‌کند و در صورت
+آماده‌بودن JACK/PipeWire و systemd کاربر، سرویس صوتی را راه‌اندازی می‌کند.
+برای نسخهٔ موجود از `bash eqforge.sh --update` استفاده کنید؛ تنظیم اجرای
+خودکار قبلی حفظ می‌شود. اسکریپت خودش `sudo` یا مدیر بستهٔ سیستم را اجرا
+نمی‌کند؛ پیش‌نیازهای سیستم‌عامل را باید
+پیشاپیش نصب کنید.
 
 از پیوند **Raw** بالا استفاده کنید، نه صفحهٔ نمایش فایل با نشانی `/blob/` در
 گیت‌هاب. ذخیرهٔ آن صفحه یک فایل HTML می‌دهد؛ تغییر پسوند به `.sh` آن را به
@@ -25,7 +32,7 @@ bash eqforge-update.sh
 یا اگر فایل اسکریپت را در اختیار دارید:
 
 ```sh
-bash eqforge-update.sh
+bash eqforge.sh --install
 ```
 
 پیش‌نیازها فقط این‌ها هستند (روی اکثر توزیع‌ها از قبل نصب‌اند):
@@ -40,28 +47,32 @@ sudo apt install python3 python3-venv build-essential git curl \
 sudo pacman -S base-devel python git curl pipewire pipewire-alsa pipewire-jack wireplumber
 
 # Fedora
-sudo dnf install python3 gcc make git curl pipewire pipewire-jack-audio-connection-kit wireplumber pipewire-devel
+sudo dnf install python3 python3-pip gcc make git curl pipewire pipewire-jack-audio-connection-kit wireplumber pipewire-devel
 ```
 
 اسکریپت بدون `sudo` همه‌چیز را در `~/.local` نصب می‌کند.
 
 | وضعیت سیستم | کاری که اسکریپت می‌کند |
 |---|---|
-| هیچ نسخه‌ای نصب نیست | نصب کامل: هسته‌ی C، هاست بلادرنگ، ماژول PipeWire، بستهٔ پایتون |
-| نسخهٔ قدیمی نصب است | به‌روزرسانی در همان محل؛ نسخهٔ قبلی برای بازگشت نگه داشته می‌شود |
-| همان نسخه نصب است | «already up to date» و هیچ تغییری نمی‌دهد |
-| نصب دستی قبلی (pip یا checkout) | نسخهٔ مدیریت‌شدهٔ خودش را نصب می‌کند و می‌گوید نسخهٔ قبلی را چطور پاک کنید |
+| `--install` | نصب یا تعمیر کامل: کامپایل هسته، نصب برنامه، میان‌بر دسکتاپ، بررسی نصب و راه‌اندازی خودکار سرویس در صورت پشتیبانی |
+| `--update` | به‌روزرسانی نسخهٔ نصب‌شده؛ اگر نصب نیست، اجرای `--install` را پیشنهاد می‌دهد |
+| اجرای بدون این دو گزینه | تشخیص خودکار نصب یا به‌روزرسانی، برای سازگاری با روش قدیمی |
+
+ماژول بلادرنگ و SPA به هدرهای توسعهٔ JACK/PipeWire نیاز دارند و در نبود آن‌ها
+رد می‌شوند؛ برنامهٔ CLI/GUI همچنان نصب می‌شود.
 
 ### گزینه‌های پرکاربرد
 
 ```sh
-bash eqforge-update.sh --check        # فقط بگو نسخهٔ نصب‌شده و آخرین نسخه چیست
-bash eqforge-update.sh --dry-run      # فقط برنامه را نشان بده، چیزی را تغییر نده
-bash eqforge-update.sh --ref v1.1.0   # نصب یک نسخهٔ مشخص
-bash eqforge-update.sh --channel main # آخرین تغییرات شاخهٔ main
-bash eqforge-update.sh --rollback     # برگشت به نسخهٔ قبلی
-bash eqforge-update.sh --uninstall    # حذف نصب (پروفایل‌ها می‌مانند)
-bash eqforge-update.sh --uninstall --purge   # حذف کامل همراه با تنظیمات
+bash eqforge.sh --install      # نصب/تعمیر کامل، شامل کامپایل
+bash eqforge.sh --update       # به‌روزرسانی نصب موجود
+bash eqforge.sh --check        # فقط بگو نسخهٔ نصب‌شده و آخرین نسخه چیست
+bash eqforge.sh --dry-run      # فقط برنامه را نشان بده، چیزی را تغییر نده
+bash eqforge.sh --ref v1.1.0   # نصب یک نسخهٔ مشخص
+bash eqforge.sh --channel main # آخرین تغییرات شاخهٔ main
+bash eqforge.sh --rollback     # برگشت به نسخهٔ قبلی
+bash eqforge.sh --uninstall    # حذف نصب (پروفایل‌ها می‌مانند)
+bash eqforge.sh --uninstall --purge   # حذف کامل همراه با تنظیمات
 ```
 
 ---
