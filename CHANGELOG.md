@@ -42,6 +42,12 @@ All notable changes to EQForge. Versions follow the package version in
   upload/analysis, advisor quick fixes and target-matched corrective EQ.
 * GUI controls for output selection, RT start/stop, stream wiring, auto-wire,
   login autostart, always-on routing, integration repair, Doctor and logs.
+* `scripts/eqforge.sh` replaces the updater's old filename. `--install` compiles
+  the native core, installs the app and dependencies, adds a desktop launcher,
+  verifies the result, and enables audio autostart when available; `--update`
+  updates an existing install. The old filename remains as a compatibility
+  launcher. Help now prioritizes common actions, conflicting flags fail with
+  guidance, and uninstall/purge require clear confirmation.
 
 ### Tests
 

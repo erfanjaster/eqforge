@@ -4,7 +4,7 @@
 
 | Component | Needed for | Packages (Debian/Ubuntu) | Packages (Fedora) |
 |---|---|---|---|
-| Python ≥ 3.10 | control plane | `python3` | `python3` |
+| Python ≥ 3.10, venv/pip support | control plane + private install environment | `python3 python3-venv python3-pip` | `python3 python3-pip` |
 | numpy, scipy | analysis, fallback engine | `python3-numpy python3-scipy` | `python3-numpy python3-scipy` |
 | soundfile | WAV/FLAC/OGG I/O | `python3-soundfile` | `python3-soundfile` |
 | gcc/clang + make | native core | `build-essential` | `gcc make` |
@@ -62,28 +62,43 @@ Installs:
 
 ## One-script install and update
 
-`scripts/eqforge-update.sh` is both the installer and the updater. It is the
-only file a new user needs:
+`scripts/eqforge.sh` is the one-command installer and updater. The former
+`scripts/eqforge-update.sh` filename remains as a deprecated compatibility
+launcher for existing links and checkouts.
 
 ```sh
 # Download the actual Bash file, not GitHub's HTML file-view page.
-curl -fsSL https://raw.githubusercontent.com/erfanjaster/eqforge/main/scripts/eqforge-update.sh -o eqforge-update.sh
+curl -fsSL https://raw.githubusercontent.com/erfanjaster/eqforge/main/scripts/eqforge.sh -o eqforge.sh
 # Must print exactly: #!/usr/bin/env bash
-head -n 1 eqforge-update.sh
-bash eqforge-update.sh
+head -n 1 eqforge.sh
+bash eqforge.sh --install
 
-# or from a checkout you already have
-./scripts/eqforge-update.sh
+# Update an existing managed installation later
+bash eqforge.sh --update
+
+# Or use the checked-in script from a checkout
+./scripts/eqforge.sh --install
 ```
 
+`--install` compiles the native core, attempts the optional JACK real-time host
+and PipeWire SPA module when their development headers are installed, creates
+a private Python environment and installs the app/dependencies, installs a
+desktop launcher, verifies the app, and enables audio autostart where the
+runtime and user systemd session support it. It is safe to use as a repair or
+reinstall command. `--update` updates an existing install; if EQForge is not
+installed, it tells you to run `--install`. Both flags execute without an
+additional confirmation prompt; `--update` does not newly enable autostart if
+you had not configured it. The script does not run a system package manager or
+`sudo`; missing OS build prerequisites must be installed first.
+
 **Downloading from your browser?** Open
-[the raw script](https://raw.githubusercontent.com/erfanjaster/eqforge/main/scripts/eqforge-update.sh)
-and save that response as `eqforge-update.sh`. Do not save the GitHub `/blob/`
+[the raw script](https://raw.githubusercontent.com/erfanjaster/eqforge/main/scripts/eqforge.sh)
+and save that response as `eqforge.sh`. Do not save the GitHub `/blob/`
 page: it is an HTML document, even when the page displays a `.sh` filename.
 If the downloaded file starts with `<!DOCTYPE html>` or `<html>`, it is not
 the updater. Delete it and download the raw file instead.
 
-What it decides by itself:
+What it decides by itself (when run without `--install` or `--update`):
 
 | Machine state | What happens |
 |---|---|
@@ -113,13 +128,15 @@ dependencies and an install works on a machine without PyPI access.
 Common invocations:
 
 ```sh
-./scripts/eqforge-update.sh --check                 # installed vs. available
-./scripts/eqforge-update.sh --dry-run               # print the plan
-./scripts/eqforge-update.sh --ref v1.2.0            # pin a release
-./scripts/eqforge-update.sh --channel main          # tip of main
-./scripts/eqforge-update.sh --source-dir ~/src/eqforge --editable   # dev
-./scripts/eqforge-update.sh --rollback              # previous version
-./scripts/eqforge-update.sh --uninstall [--purge]   # remove
+./scripts/eqforge.sh --install               # full build, install and setup
+./scripts/eqforge.sh --update                # update an existing install
+./scripts/eqforge.sh --check                 # installed vs. available
+./scripts/eqforge.sh --dry-run               # print the plan
+./scripts/eqforge.sh --ref v1.2.0            # pin a release
+./scripts/eqforge.sh --channel main          # tip of main
+./scripts/eqforge.sh --source-dir ~/src/eqforge --editable   # dev
+./scripts/eqforge.sh --rollback              # previous version
+./scripts/eqforge.sh --uninstall [--purge]   # remove
 ```
 
 Existing systemd user units are stopped before binaries are replaced and
@@ -167,9 +184,14 @@ audio. Everything should PASS (RT host is WARN until started — that's fine).
 With the script (preferred - it also removes the venv and the units):
 
 ```sh
-./scripts/eqforge-update.sh --uninstall          # keeps your profiles
-./scripts/eqforge-update.sh --uninstall --purge   # removes those too
+./scripts/eqforge.sh --uninstall          # keeps your profiles
+./scripts/eqforge.sh --uninstall --purge   # removes those too (asks you to type "purge")
 ```
+
+In scripts or other non-interactive sessions, add `--yes` to confirm. For
+example, `--uninstall --purge --yes` permanently removes profiles and settings;
+use it only when that is what you intend. `--purge` without `--uninstall` is
+rejected so it cannot be silently ignored.
 
 By hand:
 

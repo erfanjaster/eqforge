@@ -157,15 +157,30 @@ core can't load), corrupt-config quarantine, stale-socket recovery, and
 
 ## Install
 
-One script installs, updates and rolls back — it detects what is already on the
-machine and does the right thing either way:
+One script compiles and installs EQForge, refreshes an existing installation,
+and supports rollback:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/erfanjaster/eqforge/main/scripts/eqforge-update.sh -o eqforge-update.sh
+curl -fsSL https://raw.githubusercontent.com/erfanjaster/eqforge/main/scripts/eqforge.sh -o eqforge.sh
 # Check that this prints exactly: #!/usr/bin/env bash
-head -n 1 eqforge-update.sh
-bash eqforge-update.sh
+head -n 1 eqforge.sh
+bash eqforge.sh --install
 ```
+
+`--install` builds the native DSP core, installs the Python app and its
+runtime dependencies into a private environment, adds an EQForge desktop
+launcher, verifies the install, and enables the audio services when the
+required JACK/PipeWire pieces and user systemd session are available. Start the
+GUI from your applications menu or run `~/.local/bin/eqforge gui`.
+
+`--update` updates an existing install without prompting and preserves its
+autostart choice. `--install` also repairs/rebuilds an existing install and
+sets up autostart when supported. Both flags assume your consent to the
+requested install/update; they do not use `sudo` or install OS packages. The
+install needs Python 3.10+ with `venv`/`pip`, `make`, and a C compiler;
+optional real-time and PipeWire modules need their development headers. See
+[installation requirements](docs/installation.md#requirements) if a build
+prerequisite is missing.
 
 Use the **Raw** download above, not GitHub's `/blob/` file-view page. Saving
 that page downloads HTML; renaming it to `.sh` does not make it a shell script.

@@ -8,7 +8,7 @@
 #
 # NOTE: for installs from outside a checkout - and for anything a user should
 # be able to run on an existing machine to get to the newest version - use
-# `scripts/eqforge-update.sh`, which fetches from GitHub, handles a private
+# `scripts/eqforge.sh`, which fetches from GitHub, handles a private
 # venv, backs up the previous version, refreshes the login units and supports
 # --check / --rollback / --uninstall. This script only builds what is already
 # in the working tree.

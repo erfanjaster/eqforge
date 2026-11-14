@@ -1,4 +1,4 @@
-"""The one-script installer/updater (`scripts/eqforge-update.sh`).
+"""The one-script installer/updater (`scripts/eqforge.sh`).
 
 The script is the only thing a new user is handed, so its contract is narrow
 and worth testing without a network, a build, or a real install:
@@ -24,7 +24,7 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-SCRIPT = REPO_ROOT / "scripts" / "eqforge-update.sh"
+SCRIPT = REPO_ROOT / "scripts" / "eqforge.sh"
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -68,10 +68,10 @@ def test_updater_is_plain_bash_not_an_html_document():
 def test_install_instructions_download_raw_bash(document):
     text = (REPO_ROOT / document).read_text(encoding="utf-8")
     raw = ("https://raw.githubusercontent.com/erfanjaster/eqforge/"
-           "main/scripts/eqforge-update.sh")
-    assert f"curl -fsSL {raw} -o eqforge-update.sh" in text
-    assert "head -n 1 eqforge-update.sh" in text
-    assert "bash eqforge-update.sh" in text
+           "main/scripts/eqforge.sh")
+    assert f"curl -fsSL {raw} -o eqforge.sh" in text
+    assert "head -n 1 eqforge.sh" in text
+    assert "bash eqforge.sh --install" in text
     assert f"https://github.com/erfanjaster/eqforge/blob/main/{SCRIPT.name}" not in text
 
 
@@ -90,13 +90,14 @@ def test_self_test_passes(tmp_path):
 def test_help_and_version(tmp_path):
     r = run_script("--help", home=tmp_path)
     assert r.returncode == 0
-    for flag in ("--check", "--dry-run", "--rollback", "--uninstall",
-                 "--self-test", "--ref", "--source-dir"):
+    for flag in ("--install", "--update", "--check", "--dry-run",
+                 "--rollback", "--uninstall", "--self-test", "--ref",
+                 "--source-dir"):
         assert flag in r.stdout
 
     r = run_script("--version", home=tmp_path)
     assert r.returncode == 0
-    assert "eqforge-update" in r.stdout
+    assert "eqforge.sh" in r.stdout
 
 
 def test_unknown_option_fails_loudly(tmp_path):
@@ -128,6 +129,120 @@ def test_dry_run_plans_an_install_and_changes_nothing(tmp_path):
     assert not (tmp_path / "data/eqforge").exists()
     assert not (tmp_path / ".local/bin/eqforge").exists()
     assert not (tmp_path / ".local/lib/eqforge").exists()
+
+
+def test_install_flag_dry_run_plans_full_build_without_prompting(tmp_path):
+    r = run_script("--install", "--dry-run", "--ref", "v1.2.3",
+                   "--source-dir", str(REPO_ROOT), home=tmp_path)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "full install / repair" in r.stdout
+    assert "would: make -C" in r.stdout
+    assert "would: create" in r.stdout and "venv" in r.stdout
+    assert "desktop launcher" in r.stdout
+    assert "system autostart on" in r.stdout
+    assert "nothing changed" not in r.stdout
+    assert not (tmp_path / "data/eqforge").exists()
+    assert not (tmp_path / ".local/bin/eqforge").exists()
+
+
+def test_update_flag_requires_an_existing_install(tmp_path):
+    r = run_script("--update", "--ref", "v9.9.9", home=tmp_path)
+    assert r.returncode != 0
+    assert "not installed" in (r.stdout + r.stderr)
+    assert not (tmp_path / ".local/bin/eqforge").exists()
+    assert not (tmp_path / "data/eqforge/venv").exists()
+
+
+def test_update_flag_runs_without_prompt_for_installed_version(tmp_path):
+    data = tmp_path / "data/eqforge"
+    data.mkdir(parents=True)
+    (data / "install.json").write_text(json.dumps({
+        "version": "1.0.0", "stamp": "v1.0.0", "ref": "v1.0.0",
+        "source": "/nonexistent", "prefix": str(tmp_path / ".local"),
+        "venv": str(data / "venv"),
+    }))
+    r = run_script("--update", "--dry-run", "--ref", "v1.2.3",
+                   "--source-dir", str(REPO_ROOT), home=tmp_path)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "would: make -C" in r.stdout
+    assert "desktop launcher" in r.stdout
+    assert "system autostart on" not in r.stdout
+    assert "nothing changed" not in r.stdout
+
+
+def test_install_and_update_flags_are_mutually_exclusive(tmp_path):
+    r = run_script("--install", "--update", home=tmp_path)
+    assert r.returncode != 0
+    assert "cannot be combined" in (r.stdout + r.stderr)
+
+
+@pytest.mark.parametrize(("args", "message"), [
+    (("--check", "--dry-run"), "one primary action"),
+    (("--purge",), "only works with --uninstall"),
+    (("--ref", "v1.0.0", "--channel", "main"), "either --ref or --channel"),
+    (("--system", "--prefix", "/tmp/custom"), "either --system or --prefix"),
+    (("--check", "--force"), "cannot be used with --check"),
+    (("--rollback", "--no-native"), "cannot be used with --rollback"),
+    (("--uninstall", "--no-service"), "do not apply to --uninstall"),
+])
+def test_conflicting_options_fail_with_a_clear_message(tmp_path, args, message):
+    r = run_script(*args, home=tmp_path)
+    assert r.returncode != 0
+    assert message in (r.stdout + r.stderr)
+
+
+def test_uninstall_requires_explicit_confirmation_without_a_terminal(tmp_path):
+    desktop_file = tmp_path / "data/applications/eqforge.desktop"
+    desktop_file.parent.mkdir(parents=True)
+    desktop_file.write_text("keep me unless uninstall is confirmed")
+    r = run_script("--uninstall", home=tmp_path)
+    assert r.returncode != 0
+    assert "pass --yes" in (r.stdout + r.stderr)
+    assert desktop_file.exists()
+    assert not (tmp_path / "data/eqforge").exists()
+
+
+def test_purge_requires_explicit_confirmation_without_a_terminal(tmp_path):
+    config = tmp_path / "config/eqforge/profiles"
+    config.mkdir(parents=True)
+    profile = config / "keep.json"
+    profile.write_text("profile data")
+    r = run_script("--uninstall", "--purge", home=tmp_path)
+    assert r.returncode != 0
+    assert "pass --yes" in (r.stdout + r.stderr)
+    assert profile.exists()
+
+
+def test_legacy_updater_name_delegates_to_eqforge_sh(tmp_path):
+    legacy = REPO_ROOT / "scripts" / "eqforge-update.sh"
+    assert legacy.is_file() and os.access(legacy, os.X_OK)
+    env = dict(os.environ, HOME=str(tmp_path), NO_COLOR="1")
+    r = subprocess.run(["bash", str(legacy), "--version"], capture_output=True,
+                       text=True, timeout=30, env=env)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "eqforge.sh" in r.stdout
+
+
+def test_desktop_launcher_uses_the_installed_binary_path(tmp_path):
+    import shlex
+
+    definitions = SCRIPT.read_text().rsplit('\nmain "$@"', 1)[0]
+    prefix = tmp_path / "custom prefix"
+    xdg_data = tmp_path / "xdg data"
+    harness = definitions + f'''\nMODE=update
+SRC_DIR={shlex.quote(str(REPO_ROOT))}
+PREFIX={shlex.quote(str(prefix))}
+XDG_DATA_HOME={shlex.quote(str(xdg_data))}
+BIN_DIR="$PREFIX/bin"
+install_desktop_entry
+'''
+    r = subprocess.run(["bash", "-c", harness], capture_output=True, text=True,
+                       timeout=30, env={**os.environ, "HOME": str(tmp_path)})
+    assert r.returncode == 0, r.stdout + r.stderr
+    entry = (xdg_data / "applications/eqforge.desktop").read_text()
+    binary = f'"{prefix}/bin/eqforge"'
+    assert f"Exec={binary} gui" in entry
+    assert f"TryExec={binary}" in entry
 
 
 def test_dry_run_reports_the_target_version(tmp_path):
@@ -189,9 +304,23 @@ do_rollback
 
 
 def test_uninstall_is_safe_on_a_clean_machine(tmp_path):
+    desktop_file = tmp_path / "data/applications/eqforge.desktop"
+    desktop_file.parent.mkdir(parents=True)
+    desktop_file.write_text("EQForge launcher")
     r = run_script("--uninstall", "--yes", home=tmp_path)
     assert r.returncode == 0, r.stdout + r.stderr
     assert "managed files removed" in r.stdout
+    assert not desktop_file.exists()
+
+
+def test_confirmed_purge_removes_user_profiles_and_settings(tmp_path):
+    profile = tmp_path / "config/eqforge/profiles/custom.json"
+    profile.parent.mkdir(parents=True)
+    profile.write_text("profile data")
+    r = run_script("--uninstall", "--purge", "--yes", home=tmp_path)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "profiles, config and logs removed" in r.stdout
+    assert not profile.exists()
 
 
 def test_installed_state_is_read_back(tmp_path):
