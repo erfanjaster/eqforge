@@ -11,8 +11,16 @@
 نصب هست یا نه؛ خودش تشخیص می‌دهد:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/erfanjaster/eqforge/main/scripts/eqforge-update.sh | bash
+curl -fsSL https://raw.githubusercontent.com/erfanjaster/eqforge/main/scripts/eqforge-update.sh -o eqforge-update.sh
+# باید دقیقاً این خط را چاپ کند: #!/usr/bin/env bash
+head -n 1 eqforge-update.sh
+bash eqforge-update.sh
 ```
+
+از پیوند **Raw** بالا استفاده کنید، نه صفحهٔ نمایش فایل با نشانی `/blob/` در
+گیت‌هاب. ذخیرهٔ آن صفحه یک فایل HTML می‌دهد؛ تغییر پسوند به `.sh` آن را به
+اسکریپت تبدیل نمی‌کند. اگر خط اول فایل HTML است، آن را اجرا نکنید و نسخهٔ خام
+را دوباره دانلود کنید.
 
 یا اگر فایل اسکریپت را در اختیار دارید:
 

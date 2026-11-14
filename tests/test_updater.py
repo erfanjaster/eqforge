@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 from pathlib import Path
 
@@ -46,6 +47,32 @@ def run_script(*args: str, home: Path, timeout: float = 120.0):
     })
     return subprocess.run(["bash", str(SCRIPT), *args], capture_output=True,
                           text=True, timeout=timeout, env=env)
+
+
+def test_updater_is_plain_bash_not_an_html_document():
+    """A GitHub file-view page must never ship in place of the updater."""
+    data = SCRIPT.read_bytes()
+    assert data.startswith(b"#!/usr/bin/env bash\n")
+    assert b"\x00" not in data
+    assert b"\r" not in data, "ship Unix line endings, not CRLF"
+    assert not re.search(
+        rb"<!doctype\s+html|<html(?:\s|>)|<head(?:\s|>)|<body(?:\s|>)",
+        data, re.IGNORECASE,
+    ), "the updater contains an HTML document"
+    data.decode("utf-8")
+
+
+@pytest.mark.parametrize("document", [
+    "README.md", "docs/installation.md", "docs/quickstart-fa.md",
+])
+def test_install_instructions_download_raw_bash(document):
+    text = (REPO_ROOT / document).read_text(encoding="utf-8")
+    raw = ("https://raw.githubusercontent.com/erfanjaster/eqforge/"
+           "main/scripts/eqforge-update.sh")
+    assert f"curl -fsSL {raw} -o eqforge-update.sh" in text
+    assert "head -n 1 eqforge-update.sh" in text
+    assert "bash eqforge-update.sh" in text
+    assert f"https://github.com/erfanjaster/eqforge/blob/main/{SCRIPT.name}" not in text
 
 
 def test_bash_syntax_is_valid():

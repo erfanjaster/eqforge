@@ -66,12 +66,22 @@ Installs:
 only file a new user needs:
 
 ```sh
-# from GitHub (nothing else required)
-curl -fsSL https://raw.githubusercontent.com/erfanjaster/eqforge/main/scripts/eqforge-update.sh | bash
+# Download the actual Bash file, not GitHub's HTML file-view page.
+curl -fsSL https://raw.githubusercontent.com/erfanjaster/eqforge/main/scripts/eqforge-update.sh -o eqforge-update.sh
+# Must print exactly: #!/usr/bin/env bash
+head -n 1 eqforge-update.sh
+bash eqforge-update.sh
 
 # or from a checkout you already have
 ./scripts/eqforge-update.sh
 ```
+
+**Downloading from your browser?** Open
+[the raw script](https://raw.githubusercontent.com/erfanjaster/eqforge/main/scripts/eqforge-update.sh)
+and save that response as `eqforge-update.sh`. Do not save the GitHub `/blob/`
+page: it is an HTML document, even when the page displays a `.sh` filename.
+If the downloaded file starts with `<!DOCTYPE html>` or `<html>`, it is not
+the updater. Delete it and download the raw file instead.
 
 What it decides by itself:
 
